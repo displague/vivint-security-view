@@ -110,11 +110,21 @@ async function main() {
         gap: 12px;
         padding: 12px;
       }
+      body.fill .grid {
+        grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+        gap: 6px;
+        padding: 6px;
+        height: calc(100vh - 58px);
+      }
       .tile {
         background: linear-gradient(180deg, #0e1621 0%, #0a1119 100%);
         border: 1px solid #243347;
         border-radius: 10px;
         overflow: hidden;
+      }
+      body.fill .tile {
+        border-radius: 6px;
+        border-color: #1f2d3f;
       }
       .tile-head {
         display: flex;
@@ -124,12 +134,20 @@ async function main() {
         font-size: 13px;
         border-bottom: 1px solid #223348;
       }
+      body.fill .tile-head {
+        padding: 5px 8px;
+        font-size: 12px;
+      }
       .latency { color: var(--muted); font-variant-numeric: tabular-nums; }
       .live { color: var(--accent); }
       .video-wrap {
         position: relative;
         background: #000;
         aspect-ratio: 16 / 9;
+      }
+      body.fill .video-wrap {
+        aspect-ratio: auto;
+        height: calc((100vh - 58px - 18px) / 2);
       }
       video {
         width: 100%;
@@ -183,6 +201,10 @@ async function main() {
         <input id="hoverAudio" type="checkbox" checked />
       </div>
       <div class="control">
+        <span class="label">Fill Screen</span>
+        <input id="fillScreen" type="checkbox" />
+      </div>
+      <div class="control">
         <button id="audioArmBtn">Enable Audio</button>
         <span id="audioStatus" class="label">click to allow unmute on hover</span>
       </div>
@@ -208,6 +230,7 @@ async function main() {
       const cameras = ${camerasJson};
       const grid = document.getElementById("grid");
       const hoverAudioEl = document.getElementById("hoverAudio");
+      const fillScreenEl = document.getElementById("fillScreen");
       const audioArmBtn = document.getElementById("audioArmBtn");
       const audioStatus = document.getElementById("audioStatus");
       const rateEl = document.getElementById("rate");
@@ -359,6 +382,9 @@ async function main() {
           activeAudioCameraId = null;
           muteAllExcept(null);
         }
+      });
+      fillScreenEl.addEventListener("change", () => {
+        document.body.classList.toggle("fill", fillScreenEl.checked);
       });
 
       document.addEventListener("visibilitychange", () => {
