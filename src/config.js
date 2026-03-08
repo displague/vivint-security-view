@@ -1,0 +1,144 @@
+const fs = require("fs");
+const path = require("path");
+const dotenv = require("dotenv");
+
+dotenv.config();
+
+const rootDir = path.resolve(__dirname, "..");
+const camerasPath = path.join(rootDir, "cameras.json");
+const settingsPath = path.join(rootDir, "settings.json");
+const streamRoot = path.join(rootDir, "streams");
+
+function parsePositiveInt(value, fallback) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parseBoolean(value, fallback) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function loadCameras() {
+  if (!fs.existsSync(camerasPath)) {
+    throw new Error(
+      "Missing cameras.json. Copy cameras.example.json to cameras.json and set your camera URLs."
+    );
+  }
+
+  const raw = fs.readFileSync(camerasPath, "utf8");
+  const parsed = JSON.parse(raw);
+  const cameras = Array.isArray(parsed.cameras) ? parsed.cameras : [];
+  if (cameras.length === 0) {
+    throw new Error("cameras.json contains no cameras.");
+  }
+
+  return cameras.map((camera) => {
+    if (!camera.id || !camera.name || !camera.rtspUrl) {
+      throw new Error(
+        "Each camera must include id, name, and rtspUrl fields in cameras.json."
+      );
+    }
+    return {
+      id: String(camera.id),
+      name: String(camera.name),
+      rtspUrl: String(camera.rtspUrl)
+    };
+  });
+}
+
+function pickRtspUrl(camera) {
+  return (
+    camera.rtspUrl ||
+    camera.internal_rtsp_hd ||
+    camera.direct_rtsp_hd ||
+    camera.internal_rtsp_sd ||
+    camera.direct_rtsp_sd ||
+    camera.external_rtsp_hd ||
+    camera.external_rtsp_sd ||
+    null
+  );
+}
+
+function normalizeCamera(camera, sourceName) {
+  const id = camera.id ?? camera.camera_id;
+  const name = camera.name ?? camera.camera_name;
+  const rtspUrl = pickRtspUrl(camera);
+
+  if (!id || !name || !rtspUrl) {
+    throw new Error(
+      `Each camera in ${sourceName} must include id/name plus a usable RTSP URL field (rtspUrl, internal_rtsp_hd, direct_rtsp_hd, etc).`
+    );
+  }
+
+  return {
+    id: String(id),
+    name: String(name),
+    rtspUrl: String(rtspUrl)
+  };
+}
+
+function loadSettingsJson() {
+  if (!fs.existsSync(settingsPath)) {
+    return null;
+  }
+  const raw = fs.readFileSync(settingsPath, "utf8");
+  const parsed = JSON.parse(raw);
+  const cameras = Array.isArray(parsed.cameras) ? parsed.cameras : [];
+  if (cameras.length === 0) {
+    throw new Error("settings.json contains no cameras.");
+  }
+  return {
+    cameras: cameras.map((camera) => normalizeCamera(camera, "settings.json")),
+    proxy: typeof parsed.proxy === "object" && parsed.proxy ? parsed.proxy : {}
+  };
+}
+
+function loadConfig() {
+  const settings = loadSettingsJson();
+
+  const port = parsePositiveInt(
+    settings?.proxy?.port ?? process.env.PORT,
+    8080
+  );
+  const baseUrl =
+    settings?.proxy?.baseUrl || process.env.BASE_URL || `http://localhost:${port}`;
+  const streamToken = settings?.proxy?.streamToken || process.env.STREAM_TOKEN || "";
+  const ffmpegBin = process.env.FFMPEG_BIN || "ffmpeg";
+  const hlsSegmentTime = parsePositiveInt(process.env.HLS_SEGMENT_TIME, 1);
+  const hlsListSize = parsePositiveInt(process.env.HLS_LIST_SIZE, 3);
+  const streamTranscode = parseBoolean(process.env.STREAM_TRANSCODE, true);
+  const videoEncoder = process.env.VIDEO_ENCODER || "libx264";
+  const videoPreset = process.env.VIDEO_PRESET || "veryfast";
+  const googleProjectId = process.env.GOOGLE_PROJECT_ID || "dev-local-project";
+
+  return {
+    port,
+    baseUrl: baseUrl.replace(/\/$/, ""),
+    streamToken,
+    ffmpegBin,
+    hlsSegmentTime,
+    hlsListSize,
+    streamTranscode,
+    videoEncoder,
+    videoPreset,
+    googleProjectId,
+    streamRoot,
+    cameras: settings?.cameras || loadCameras()
+  };
+}
+
+module.exports = {
+  loadConfig
+};
