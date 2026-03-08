@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vivint-bridge-config
+  namespace: vivint-bridge
+data:
+  APP_MODE: public-bridge
+  PORT: "8080"
+  BASE_URL: https://bridge.example.com
+  ENABLE_ROOT_INDEX: "0"
+  ENABLE_SECURITY_VIEW: "0"
+  STREAM_SOURCE_PREFERENCE: external
+  HLS_SEGMENT_TIME: "1"
+  HLS_LIST_SIZE: "3"
+  STREAM_TRANSCODE: "1"
+  VIDEO_ENCODER: libx264
+  VIDEO_PRESET: veryfast
+  GOOGLE_PROJECT_ID: your-google-project-id
+  GOOGLE_AGENT_USER_ID: local-user

@@ -4,6 +4,26 @@ const morgan = require("morgan");
 const { loadConfig } = require("./config");
 const { StreamManager } = require("./stream-manager");
 const { createSmartHomeHandler } = require("./google-smart-home");
+const { OAuthStore } = require("./oauth-store");
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function htmlBool(value) {
+  return value ? "Yes" : "No";
+}
+
+function oauthError(res, status, error, description) {
+  return res.status(status).json({
+    error,
+    error_description: description
+  });
+}
 
 function logger() {
   return {
@@ -22,20 +42,28 @@ async function main() {
   const log = logger();
   const config = loadConfig();
   const streamManager = new StreamManager(config, log);
+  const oauthStore = new OAuthStore(config);
   await streamManager.init();
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: false }));
   app.use(morgan("dev"));
 
   app.get("/healthz", (req, res) => {
     res.json({
       ok: true,
-      cameras: config.cameras.map((c) => c.id)
+      cameras: config.cameras.map((c) => c.id),
+      googleOAuthConfigured: oauthStore.isConfigured(),
+      appMode: config.appMode
     });
   });
 
   app.get("/", (req, res) => {
+    if (!config.enableRootIndex) {
+      return res.status(404).send("Not found");
+    }
+
     const list = config.cameras
       .map(
         (camera) =>
@@ -44,11 +72,278 @@ async function main() {
       .join("");
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.end(
-      `<h1>Vivint Local Camera Bridge</h1><p><a href="/security">Open Security View</a></p><ul>${list}</ul>`
+      `<h1>Vivint Local Camera Bridge</h1><p><a href="/security">Open Security View</a></p><p><a href="/google/setup">Google Setup</a></p><p><a href="/oauth/authorize?client_id=demo-client&redirect_uri=http://localhost/callback&response_type=code&state=demo">OAuth Demo</a></p><ul>${list}</ul>`
     );
   });
 
+  app.get("/google/setup", (req, res) => {
+    const redirectProd = `https://oauth-redirect.googleusercontent.com/r/${config.googleProjectId}`;
+    const redirectSandbox = `https://oauth-redirect-sandbox.googleusercontent.com/r/${config.googleProjectId}`;
+    const publicBaseUrl = config.baseUrl;
+    const oauthConfigured = oauthStore.isConfigured();
+    const isHttps = /^https:\/\//i.test(publicBaseUrl);
+    const clientConfigured = Boolean(
+      config.googleClientId && config.googleClientSecret
+    );
+
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    return res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Google Setup</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --panel: #111a2a;
+        --line: #26384f;
+        --text: #e7eef8;
+        --muted: #94a8c4;
+        --ok: #39d98a;
+        --warn: #f4b740;
+        --bad: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at top left, #16253a 0%, var(--bg) 48%);
+        color: var(--text);
+        font-family: "Segoe UI", Tahoma, sans-serif;
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px 18px 40px;
+      }
+      h1, h2 { margin: 0 0 12px; }
+      p { color: var(--muted); }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        background: linear-gradient(180deg, rgba(19,30,47,0.96), rgba(11,18,31,0.96));
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 16px;
+      }
+      .status {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .ok { background: rgba(57,217,138,0.15); color: var(--ok); }
+      .warn { background: rgba(244,183,64,0.15); color: var(--warn); }
+      .bad { background: rgba(255,107,107,0.15); color: var(--bad); }
+      code, pre {
+        font-family: Consolas, "Courier New", monospace;
+      }
+      pre {
+        margin: 10px 0 0;
+        padding: 12px;
+        background: #09111d;
+        border: 1px solid #203146;
+        border-radius: 10px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      ul {
+        margin: 10px 0 0;
+        padding-left: 18px;
+        color: var(--text);
+      }
+      li { margin: 6px 0; }
+      .label {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      a { color: #9bd2ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Google Home Setup</h1>
+      <p>Use this page to fill the Google Cloud OAuth client and Google Home cloud-to-cloud configuration with the exact values this bridge expects.</p>
+
+      <div class="grid">
+        <section class="card">
+          <h2>Current Status</h2>
+          <div class="label">Base URL</div>
+          <pre>${escapeHtml(publicBaseUrl)}</pre>
+          <div class="label" style="margin-top:12px">Project ID</div>
+          <pre>${escapeHtml(config.googleProjectId)}</pre>
+          <div class="label" style="margin-top:12px">Checks</div>
+          <ul>
+            <li>Public HTTPS base URL: <span class="status ${isHttps ? "ok" : "bad"}">${htmlBool(isHttps)}</span></li>
+            <li>OAuth client configured in app: <span class="status ${clientConfigured ? "ok" : "bad"}">${htmlBool(clientConfigured)}</span></li>
+            <li>Local bridge login configured: <span class="status ${oauthConfigured ? "ok" : "bad"}">${htmlBool(oauthConfigured)}</span></li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h2>Google Cloud OAuth Client</h2>
+          <p>Create an OAuth client of type <strong>Web application</strong>.</p>
+          <div class="label">Authorized JavaScript origins</div>
+          <pre>None required for this server-side flow</pre>
+          <div class="label" style="margin-top:12px">Authorized redirect URIs</div>
+          <pre>${escapeHtml(redirectProd)}
+${escapeHtml(redirectSandbox)}</pre>
+        </section>
+
+        <section class="card">
+          <h2>Google Home Cloud-to-cloud</h2>
+          <div class="label">Fulfillment URL</div>
+          <pre>${escapeHtml(`${publicBaseUrl}/smarthome`)}</pre>
+          <div class="label" style="margin-top:12px">Authorization URL</div>
+          <pre>${escapeHtml(`${publicBaseUrl}/oauth/authorize`)}</pre>
+          <div class="label" style="margin-top:12px">Token URL</div>
+          <pre>${escapeHtml(`${publicBaseUrl}/oauth/token`)}</pre>
+        </section>
+
+        <section class="card">
+          <h2>Env Vars To Set</h2>
+          <pre>GOOGLE_PROJECT_ID=${escapeHtml(config.googleProjectId)}
+GOOGLE_CLIENT_ID=${escapeHtml(config.googleClientId || "paste-client-id-here")}
+GOOGLE_CLIENT_SECRET=${escapeHtml(config.googleClientSecret || "paste-client-secret-here")}
+GOOGLE_AUTH_USER=${escapeHtml(config.googleAuthUser || "local-admin-username")}
+GOOGLE_AUTH_PASS=${escapeHtml(config.googleAuthPass ? "configured" : "local-admin-password")}
+BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>`);
+  });
+
+  app.get("/oauth/authorize", (req, res) => {
+    if (!oauthStore.isConfigured()) {
+      return res.status(500).send(
+        "Google OAuth is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_AUTH_USER, and GOOGLE_AUTH_PASS."
+      );
+    }
+
+    const { client_id: clientId, redirect_uri: redirectUri, response_type: responseType, state } = req.query;
+    if (responseType !== "code" || !clientId || !redirectUri) {
+      return res.status(400).send("Invalid OAuth authorize request.");
+    }
+
+    if (clientId !== config.googleClientId) {
+      return res.status(400).send("Unknown client_id.");
+    }
+
+    const error = req.query.error ? `<p style="color:#b33">${escapeHtml(req.query.error)}</p>` : "";
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    return res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Authorize Google Home</title>
+    <style>
+      body { font-family: "Segoe UI", Tahoma, sans-serif; background:#0f1720; color:#e7eef8; display:grid; place-items:center; min-height:100vh; margin:0; }
+      form { width:min(420px, 92vw); background:#162230; border:1px solid #29415e; border-radius:12px; padding:24px; }
+      label { display:block; margin:12px 0 6px; font-size:14px; color:#9eb1c8; }
+      input { width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px; border:1px solid #35506f; background:#0d1823; color:#eef5ff; }
+      button { margin-top:18px; width:100%; padding:11px 12px; border-radius:8px; border:0; background:#39d98a; color:#082112; font-weight:700; cursor:pointer; }
+      .sub { font-size:13px; color:#9eb1c8; margin-top:4px; }
+    </style>
+  </head>
+  <body>
+    <form method="post" action="/oauth/login">
+      <h1 style="margin:0 0 8px">Authorize Google Home</h1>
+      <div class="sub">Sign in with the local bridge account to link cameras.</div>
+      ${error}
+      <input type="hidden" name="client_id" value="${escapeHtml(clientId)}" />
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}" />
+      <input type="hidden" name="state" value="${escapeHtml(state || "")}" />
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" />
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" />
+      <button type="submit">Link Cameras</button>
+    </form>
+  </body>
+</html>`);
+  });
+
+  app.post("/oauth/login", (req, res) => {
+    const { client_id: clientId, redirect_uri: redirectUri, state, username, password } = req.body;
+    if (!oauthStore.validateLocalUser(username, password)) {
+      const params = new URLSearchParams({
+        client_id: clientId || "",
+        redirect_uri: redirectUri || "",
+        response_type: "code",
+        state: state || "",
+        error: "Invalid username or password."
+      });
+      return res.redirect(`/oauth/authorize?${params.toString()}`);
+    }
+
+    const code = oauthStore.issueAuthCode({
+      clientId,
+      redirectUri,
+      userId: config.googleAgentUserId
+    });
+
+    const redirect = new URL(String(redirectUri));
+    redirect.searchParams.set("code", code);
+    if (state) {
+      redirect.searchParams.set("state", state);
+    }
+    return res.redirect(redirect.toString());
+  });
+
+  app.post("/oauth/token", (req, res) => {
+    if (!oauthStore.isConfigured()) {
+      return oauthError(res, 500, "server_error", "OAuth is not configured.");
+    }
+
+    const {
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: grantType,
+      code,
+      redirect_uri: redirectUri,
+      refresh_token: refreshToken
+    } = req.body;
+
+    if (!oauthStore.validateClient(clientId, clientSecret)) {
+      return oauthError(res, 401, "invalid_client", "Client authentication failed.");
+    }
+
+    if (grantType === "authorization_code") {
+      const tokenSet = oauthStore.consumeAuthCode(code, {
+        clientId,
+        redirectUri
+      });
+      if (!tokenSet) {
+        return oauthError(res, 400, "invalid_grant", "Authorization code is invalid.");
+      }
+      return res.json(tokenSet);
+    }
+
+    if (grantType === "refresh_token") {
+      const tokenSet = oauthStore.refreshAccessToken(refreshToken);
+      if (!tokenSet) {
+        return oauthError(res, 400, "invalid_grant", "Refresh token is invalid.");
+      }
+      return res.json(tokenSet);
+    }
+
+    return oauthError(res, 400, "unsupported_grant_type", "Unsupported grant_type.");
+  });
+
   app.get("/security", (req, res) => {
+    if (!config.enableSecurityView) {
+      return res.status(404).send("Security view disabled");
+    }
+
     const camerasJson = JSON.stringify(
       config.cameras.map((camera) => ({
         id: camera.id,
@@ -702,7 +997,8 @@ async function main() {
     createSmartHomeHandler({
       config,
       logger: log,
-      streamManager
+      streamManager,
+      oauthStore
     })
   );
 

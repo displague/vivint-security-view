@@ -1,0 +1,11 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vivint-bridge
+  namespace: vivint-bridge
+spec:
+  template:
+    spec:
+      containers:
+        - name: vivint-bridge
+          image: registry.example.com/vivint-google-home-bridge:latest
