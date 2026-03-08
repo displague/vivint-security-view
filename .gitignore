@@ -4,3 +4,5 @@ streams
 node_modules/
 .env
 *.log
+__pycache__/
+*.pyc
