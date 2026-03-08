@@ -56,7 +56,7 @@ Features:
 - auto catch-up mode for reduced live lag
 - fill-screen mode for larger feed area
 - focus view modes: `all`, `1`, `2`, `4` (top moving cameras)
-- optional browser face detection overlay count (when FaceDetector API is supported)
+- optional browser face detection with count and on-video face boxes (when FaceDetector API is supported)
 - signal-loss overlay with automatic reconnect when the server comes back
 
 ## Camera Config

@@ -169,6 +169,13 @@ async function main() {
         display: block;
         object-fit: cover;
       }
+      .face-overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
       .hint {
         position: absolute;
         left: 8px;
@@ -311,6 +318,7 @@ async function main() {
       let activeAudioCameraId = null;
       let audioArmed = false;
       let focusedCameraId = null;
+      let focusOrder = [];
       const motionThreshold = 12;
       const frameWidth = 80;
       const frameHeight = 45;
@@ -351,10 +359,6 @@ async function main() {
 
       function setFocusedCamera(cameraId) {
         focusedCameraId = cameraId;
-        document.body.classList.toggle("focus", Boolean(cameraId) && focusModeEl.value !== "all");
-        for (const s of sessions) {
-          s.tile.classList.toggle("focused", s.camera.id === cameraId);
-        }
       }
 
       function showSignalLoss(show) {
@@ -434,6 +438,7 @@ async function main() {
         const mode = focusModeEl.value;
         if (mode === "all") {
           document.body.classList.remove("focus");
+          focusOrder = [];
           for (const s of sessions) {
             s.tile.classList.remove("hidden");
             s.tile.classList.remove("focused");
@@ -447,15 +452,22 @@ async function main() {
           return;
         }
         const sorted = [...sessions].sort((a, b) => b.motionScore - a.motionScore);
-        const top = sorted.slice(0, count);
-        const topIds = new Set(top.map((s) => s.camera.id));
+        const top = sorted.slice(0, count).map((s) => s.camera.id);
+        const nextSet = new Set(top);
+        const currentSet = new Set(focusOrder);
+        const sameMembers =
+          focusOrder.length === top.length &&
+          [...nextSet].every((id) => currentSet.has(id));
+        const orderedIds = sameMembers ? focusOrder : top;
+        focusOrder = orderedIds;
+        const topIds = new Set(orderedIds);
         document.body.classList.add("focus");
 
         for (const s of sessions) {
           const inTop = topIds.has(s.camera.id);
           s.tile.classList.toggle("hidden", !inTop);
           s.tile.classList.toggle("focused", inTop);
-          s.tile.style.order = inTop ? String(top.findIndex((x) => x.camera.id === s.camera.id)) : "";
+          s.tile.style.order = inTop ? String(orderedIds.indexOf(s.camera.id)) : "";
         }
       }
 
@@ -484,6 +496,8 @@ async function main() {
       async function analyzeFaces(session) {
         if (!faceDetector || !faceDetectEl.checked || session.video.readyState < 2) {
           session.faceEl.textContent = "F -";
+          session.lastFaces = [];
+          drawFaceBoxes(session);
           return;
         }
         const now = Date.now();
@@ -494,9 +508,56 @@ async function main() {
         try {
           const faces = await faceDetector.detect(session.video);
           session.faceCount = faces.length;
+          session.lastFaces = faces;
           session.faceEl.textContent = "F " + String(faces.length);
+          drawFaceBoxes(session);
         } catch (_e) {
           session.faceEl.textContent = "F ?";
+          session.lastFaces = [];
+          drawFaceBoxes(session);
+        }
+      }
+
+      function drawFaceBoxes(session) {
+        const canvas = session.faceCanvas;
+        const ctx = session.faceCtx;
+        if (!canvas || !ctx) {
+          return;
+        }
+        const w = session.video.clientWidth || 0;
+        const h = session.video.clientHeight || 0;
+        if (w <= 0 || h <= 0) {
+          return;
+        }
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+        }
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!faceDetectEl.checked || !Array.isArray(session.lastFaces) || session.lastFaces.length === 0) {
+          return;
+        }
+
+        const vw = session.video.videoWidth || w;
+        const vh = session.video.videoHeight || h;
+        const sx = canvas.width / vw;
+        const sy = canvas.height / vh;
+
+        ctx.strokeStyle = "#f4b740";
+        ctx.fillStyle = "rgba(244,183,64,0.15)";
+        ctx.lineWidth = 2;
+
+        for (const face of session.lastFaces) {
+          const box = face.boundingBox;
+          if (!box) {
+            continue;
+          }
+          const x = box.x * sx;
+          const y = box.y * sy;
+          const bw = box.width * sx;
+          const bh = box.height * sy;
+          ctx.fillRect(x, y, bw, bh);
+          ctx.strokeRect(x, y, bw, bh);
         }
       }
 
@@ -514,12 +575,14 @@ async function main() {
           </div>
           <div class="video-wrap">
             <video autoplay muted playsinline controls></video>
+            <canvas class="face-overlay"></canvas>
             <div class="hint">hover to unmute</div>
           </div>
         \`;
         grid.appendChild(tile);
 
         const video = tile.querySelector("video");
+        const faceCanvas = tile.querySelector(".face-overlay");
         const latencyEl = tile.querySelector(".latency");
         const motionEl = tile.querySelector(".motion");
         const faceEl = tile.querySelector(".faces");
@@ -535,17 +598,21 @@ async function main() {
           latencyEl,
           motionEl,
           faceEl,
+          faceCanvas,
+          faceCtx: faceCanvas.getContext("2d"),
           canvasCtx: canvas.getContext("2d", { willReadFrequently: true }),
           prevGray: null,
           motionScore: 0,
           faceCount: 0,
-          lastFaceAt: 0
+          lastFaceAt: 0,
+          lastFaces: []
         };
         sessions.push(session);
 
         video.addEventListener("loadedmetadata", () => {
           applyBasePlaybackRate();
           video.play().catch(() => {});
+          drawFaceBoxes(session);
         });
 
         tile.addEventListener("mouseenter", () => {
