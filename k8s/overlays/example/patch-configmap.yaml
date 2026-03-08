@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vivint-bridge-config
+  namespace: vivint-bridge
+data:
+  BASE_URL: https://bridge.example.com
+  GOOGLE_PROJECT_ID: your-google-project-id

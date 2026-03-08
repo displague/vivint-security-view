@@ -1,0 +1,8 @@
+node_modules/
+references/
+scripts/
+streams/
+settings.json
+.env
+.git
+*.log

@@ -10,7 +10,7 @@ It does two jobs:
 ## Important Constraint
 
 Google camera streaming (`action.devices.traits.CameraStream`) is cloud-to-cloud and is not supported by Local Home SDK for local-only camera streaming.  
-This means a LAN-only proxy is not enough by itself; Google must reach a fulfillment endpoint and account linking must be configured for Home Graph integration.
+This means Google must reach this service over HTTPS and account linking must be configured for Home Graph integration.
 
 ## Project Layout
 
@@ -37,6 +37,19 @@ This means a LAN-only proxy is not enough by itself; Google must reach a fulfill
    `Copy-Item cameras.example.json cameras.json`
 5. Set `BASE_URL` in `.env` only if not using `proxy.baseUrl` in `settings.json`.
 
+## Deployment Modes
+
+- `hybrid` (default): local viewer, local bridge, Google endpoints all enabled
+- `public-bridge`: intended for public HTTPS deployment; disable the local viewer routes and serve only OAuth, Smart Home, and stream endpoints
+
+Relevant env flags:
+
+- `APP_MODE=public-bridge`
+- `ENABLE_ROOT_INDEX=0`
+- `ENABLE_SECURITY_VIEW=0`
+- `SETTINGS_FILE=/var/run/vivint-bridge/settings.json`
+- `STREAM_SOURCE_PREFERENCE=external`
+
 ## Run
 
 `npm start`
@@ -48,6 +61,10 @@ Health check:
 Security wall:
 
 `http://localhost:8080/security`
+
+Google setup helper:
+
+`http://localhost:8080/google/setup`
 
 Features:
 - all cameras live in one grid
@@ -91,6 +108,8 @@ Optional `settings.json` proxy fields:
 }
 ```
 
+For Kubernetes/public deployment, use only the `cameras` section and prefer `external_rtsp_hd` / `external_rtsp_sd`.
+
 `STREAM_TRANSCODE` (default `1`) controls video behavior:
 - `1`: transcode to H.264/yuv420p with forced keyframes for broad player compatibility
 - `0`: stream copy (`-c:v copy`) for lower CPU usage
@@ -111,6 +130,12 @@ Webhook URL:
 
 `POST /smarthome`
 
+OAuth endpoints:
+
+- `GET /oauth/authorize`
+- `POST /oauth/login`
+- `POST /oauth/token`
+
 Supported intents:
 
 - `action.devices.SYNC`
@@ -123,6 +148,88 @@ For `EXECUTE`, the app returns:
 - `cameraStreamAccessUrl: <BASE_URL>/stream/<camera-id>/index.m3u8`
 
 If `STREAM_TOKEN` is set, the token is required on direct playlist requests and appended to URLs returned for Google.
+
+## Google Home Setup
+
+Set these environment variables before exposing the bridge publicly:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_AUTH_USER`
+- `GOOGLE_AUTH_PASS`
+- `GOOGLE_AGENT_USER_ID`
+
+In Google Home Developer Console / Google Cloud smart home setup:
+
+1. Use cloud-to-cloud fulfillment.
+2. Set fulfillment URL to `https://<your-public-host>/smarthome`
+3. Set OAuth authorization URL to `https://<your-public-host>/oauth/authorize`
+4. Set OAuth token URL to `https://<your-public-host>/oauth/token`
+5. Register the same client id / client secret in both Google and this app.
+6. Ensure `BASE_URL` points to the same public HTTPS host so returned HLS URLs are reachable by Google.
+
+For the Google Cloud OAuth client itself:
+
+1. Choose application type `Web application`
+2. Leave `Authorized JavaScript origins` empty
+3. Add redirect URIs:
+   `https://oauth-redirect.googleusercontent.com/r/<GOOGLE_PROJECT_ID>`
+   `https://oauth-redirect-sandbox.googleusercontent.com/r/<GOOGLE_PROJECT_ID>`
+
+The `/google/setup` page renders these values directly from your current config so you do not have to derive them manually.
+
+## Kubernetes Deployment
+
+This repo includes manifests under `k8s/` for a dedicated namespace:
+
+- `k8s/base/`
+- `k8s/secret.example.yaml`
+- `k8s/kustomization.yaml`
+- `k8s/overlays/example/`
+
+Intended split:
+
+- local machine keeps `/security` and your private `settings.json`
+- cluster runs the public Google-facing bridge at your chosen public host
+- cluster bridge reads a secret-mounted `settings.json` containing only the cameras and their external Vivint RTSP URLs
+
+Important:
+
+- Do not commit real `settings.json` or `.env`
+- Do not put RTSP URLs in a ConfigMap; they contain credentials and belong in a Secret
+- Do not push client secrets into Docker image layers; inject them only through Kubernetes secrets
+
+Suggested flow:
+
+1. Push this repo to a private GitHub repository
+2. Let GitHub Actions publish the image to private GHCR on pushes to `main`
+3. Copy `k8s/overlays/example/` to `k8s/overlays/local/`
+4. Edit the local overlay patches with your real host, project id, and image
+5. Create real secrets from local files instead of editing `secret.example.yaml` in place
+6. Create a `ghcr-pull-secret` in the namespace so the cluster can pull the private image
+7. Apply the local overlay to the `vivint-bridge` namespace
+
+Helper for local secret creation:
+
+- `k8s/apply-secrets.example.ps1`
+
+That script is intended to stay local. Keep the real filled-in copy out of git.
+
+Kustomize usage:
+
+- Safe committed base: `kubectl apply -k k8s`
+- Safe committed example: `kubectl apply -k k8s/overlays/example`
+- Intended real deployment: `kubectl apply -k k8s/overlays/local`
+
+The example overlay is commit-safe. The local overlay should be copied from it and kept out of git via `.gitignore`.
+
+GitHub Actions:
+
+- `.github/workflows/publish.yml` publishes `ghcr.io/<owner>/vivint-security-view`
+- packages should remain private
+- the cluster should pull the image using the `ghcr-pull-secret`
+
+This implementation is intentionally single-account and local-admin oriented. It is suitable for personal use and Google test-mode linking, not multi-user production.
 
 ## Vivint Notes
 

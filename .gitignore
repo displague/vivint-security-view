@@ -6,3 +6,7 @@ node_modules/
 *.log
 __pycache__/
 *.pyc
+k8s/apply-secrets.ps1
+k8s/settings.public.json
+k8s/overlays/local/
+.kube.config

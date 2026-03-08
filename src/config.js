@@ -5,8 +5,8 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 const rootDir = path.resolve(__dirname, "..");
-const camerasPath = path.join(rootDir, "cameras.json");
-const settingsPath = path.join(rootDir, "settings.json");
+const defaultCamerasPath = path.join(rootDir, "cameras.json");
+const defaultSettingsPath = path.join(rootDir, "settings.json");
 const streamRoot = path.join(rootDir, "streams");
 
 function parsePositiveInt(value, fallback) {
@@ -30,10 +30,19 @@ function parseBoolean(value, fallback) {
   return fallback;
 }
 
+function selectCameraPath() {
+  return process.env.CAMERAS_FILE || defaultCamerasPath;
+}
+
+function selectSettingsPath() {
+  return process.env.SETTINGS_FILE || defaultSettingsPath;
+}
+
 function loadCameras() {
+  const camerasPath = selectCameraPath();
   if (!fs.existsSync(camerasPath)) {
     throw new Error(
-      "Missing cameras.json. Copy cameras.example.json to cameras.json and set your camera URLs."
+      `Missing camera config at ${camerasPath}. Copy cameras.example.json to cameras.json and set your camera URLs.`
     );
   }
 
@@ -58,23 +67,37 @@ function loadCameras() {
   });
 }
 
-function pickRtspUrl(camera) {
+function pickRtspUrl(camera, sourcePreference) {
+  const order =
+    sourcePreference === "external"
+      ? [
+          camera.rtspUrl,
+          camera.external_rtsp_hd,
+          camera.external_rtsp_sd,
+          camera.internal_rtsp_hd,
+          camera.direct_rtsp_hd,
+          camera.internal_rtsp_sd,
+          camera.direct_rtsp_sd
+        ]
+      : [
+          camera.rtspUrl,
+          camera.internal_rtsp_hd,
+          camera.direct_rtsp_hd,
+          camera.internal_rtsp_sd,
+          camera.direct_rtsp_sd,
+          camera.external_rtsp_hd,
+          camera.external_rtsp_sd
+        ];
   return (
-    camera.rtspUrl ||
-    camera.internal_rtsp_hd ||
-    camera.direct_rtsp_hd ||
-    camera.internal_rtsp_sd ||
-    camera.direct_rtsp_sd ||
-    camera.external_rtsp_hd ||
-    camera.external_rtsp_sd ||
+    order.find(Boolean) ||
     null
   );
 }
 
-function normalizeCamera(camera, sourceName) {
+function normalizeCamera(camera, sourceName, sourcePreference) {
   const id = camera.id ?? camera.camera_id;
   const name = camera.name ?? camera.camera_name;
-  const rtspUrl = pickRtspUrl(camera);
+  const rtspUrl = pickRtspUrl(camera, sourcePreference);
 
   if (!id || !name || !rtspUrl) {
     throw new Error(
@@ -89,7 +112,8 @@ function normalizeCamera(camera, sourceName) {
   };
 }
 
-function loadSettingsJson() {
+function loadSettingsJson(sourcePreference) {
+  const settingsPath = selectSettingsPath();
   if (!fs.existsSync(settingsPath)) {
     return null;
   }
@@ -100,13 +124,16 @@ function loadSettingsJson() {
     throw new Error("settings.json contains no cameras.");
   }
   return {
-    cameras: cameras.map((camera) => normalizeCamera(camera, "settings.json")),
+    cameras: cameras.map((camera) =>
+      normalizeCamera(camera, "settings.json", sourcePreference)
+    ),
     proxy: typeof parsed.proxy === "object" && parsed.proxy ? parsed.proxy : {}
   };
 }
 
 function loadConfig() {
-  const settings = loadSettingsJson();
+  const streamSourcePreference = process.env.STREAM_SOURCE_PREFERENCE || "internal";
+  const settings = loadSettingsJson(streamSourcePreference);
 
   const port = parsePositiveInt(
     settings?.proxy?.port ?? process.env.PORT,
@@ -122,6 +149,14 @@ function loadConfig() {
   const videoEncoder = process.env.VIDEO_ENCODER || "libx264";
   const videoPreset = process.env.VIDEO_PRESET || "veryfast";
   const googleProjectId = process.env.GOOGLE_PROJECT_ID || "dev-local-project";
+  const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
+  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+  const googleAuthUser = process.env.GOOGLE_AUTH_USER || "";
+  const googleAuthPass = process.env.GOOGLE_AUTH_PASS || "";
+  const googleAgentUserId = process.env.GOOGLE_AGENT_USER_ID || "local-user";
+  const enableSecurityView = parseBoolean(process.env.ENABLE_SECURITY_VIEW, true);
+  const enableRootIndex = parseBoolean(process.env.ENABLE_ROOT_INDEX, true);
+  const appMode = process.env.APP_MODE || "hybrid";
 
   return {
     port,
@@ -134,6 +169,15 @@ function loadConfig() {
     videoEncoder,
     videoPreset,
     googleProjectId,
+    googleClientId,
+    googleClientSecret,
+    googleAuthUser,
+    googleAuthPass,
+    googleAgentUserId,
+    enableSecurityView,
+    enableRootIndex,
+    appMode,
+    streamSourcePreference,
     streamRoot,
     cameras: settings?.cameras || loadCameras()
   };

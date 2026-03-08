@@ -4,9 +4,8 @@ function asArray(value) {
 
 function buildSyncPayload(config) {
   return {
-    requestId: "sync-local",
     payload: {
-      agentUserId: "local-user",
+      agentUserId: config.googleAgentUserId,
       devices: config.cameras.map((camera) => ({
         id: camera.id,
         type: "action.devices.types.CAMERA",
@@ -43,7 +42,6 @@ function buildQueryPayload(config, deviceIds) {
     };
   }
   return {
-    requestId: "query-local",
     payload: {
       devices
     }
@@ -90,7 +88,6 @@ function buildExecutePayload(config, commands) {
   }
 
   return {
-    requestId: "execute-local",
     payload: {
       commands: results
     }
@@ -105,25 +102,50 @@ function parseIntent(body) {
   return inputs[0].intent || null;
 }
 
-function createSmartHomeHandler({ config, logger, streamManager }) {
+function authError(res) {
+  return res.status(401).json({
+    error: "unauthorized"
+  });
+}
+
+function extractBearerToken(req) {
+  const header = req.headers.authorization || "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match ? match[1] : null;
+}
+
+function createSmartHomeHandler({ config, logger, streamManager, oauthStore }) {
   const syncResponse = buildSyncPayload(config);
 
   return async function smartHomeHandler(req, res) {
     try {
+      const accessToken = extractBearerToken(req);
+      if (!accessToken || !oauthStore.verifyAccessToken(accessToken)) {
+        return authError(res);
+      }
+
       const intent = parseIntent(req.body);
       if (!intent) {
         return res.status(400).json({ error: "Malformed payload: missing inputs/intent" });
       }
 
+      const requestId = req.body.requestId || "local-request";
+
       if (intent === "action.devices.SYNC") {
-        return res.json(syncResponse);
+        return res.json({
+          requestId,
+          ...syncResponse
+        });
       }
 
       if (intent === "action.devices.QUERY") {
         const ids = asArray(req.body.inputs?.[0]?.payload?.devices)
           .map((d) => d.id)
           .filter(Boolean);
-        return res.json(buildQueryPayload(config, ids));
+        return res.json({
+          requestId,
+          ...buildQueryPayload(config, ids)
+        });
       }
 
       if (intent === "action.devices.EXECUTE") {
@@ -146,7 +168,17 @@ function createSmartHomeHandler({ config, logger, streamManager }) {
           }
         }
 
-        return res.json(buildExecutePayload(config, commands));
+        return res.json({
+          requestId,
+          ...buildExecutePayload(config, commands)
+        });
+      }
+
+      if (intent === "action.devices.DISCONNECT") {
+        return res.json({
+          requestId,
+          payload: {}
+        });
       }
 
       return res.status(400).json({ error: `Unsupported intent: ${intent}` });
