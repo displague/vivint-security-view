@@ -54,6 +54,9 @@ Features:
 - hover over a tile to unmute that camera (others stay muted)
 - playback rate selector (1.0x to 2.0x)
 - auto catch-up mode for reduced live lag
+- fill-screen mode for larger feed area
+- auto-focus mode that highlights the camera with strongest detected motion
+- optional browser face detection overlay count (when FaceDetector API is supported)
 
 ## Camera Config
 
