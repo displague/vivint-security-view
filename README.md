@@ -214,6 +214,7 @@ Helper for local secret creation:
 - `k8s/apply-secrets.example.ps1`
 
 That script is intended to stay local. Keep the real filled-in copy out of git.
+It defaults `KUBECONFIG` to the repo-local `.kube.config`.
 
 Kustomize usage:
 
