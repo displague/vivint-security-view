@@ -121,6 +121,7 @@ async function main() {
         border: 1px solid #243347;
         border-radius: 10px;
         overflow: hidden;
+        transition: transform 140ms ease, opacity 180ms ease, border-color 180ms ease;
       }
       body.fill .tile {
         border-radius: 6px;
@@ -140,6 +141,19 @@ async function main() {
       }
       .latency { color: var(--muted); font-variant-numeric: tabular-nums; }
       .live { color: var(--accent); }
+      .meta {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .motion {
+        color: #9bd2ff;
+        font-variant-numeric: tabular-nums;
+      }
+      .faces {
+        color: #ffd58a;
+        font-variant-numeric: tabular-nums;
+      }
       .video-wrap {
         position: relative;
         background: #000;
@@ -167,6 +181,21 @@ async function main() {
         transition: opacity 140ms ease;
       }
       .tile:hover .hint { opacity: 0; }
+      body.focus .tile { opacity: 0.45; transform: scale(0.99); }
+      body.focus .tile.focused {
+        opacity: 1;
+        transform: none;
+        border-color: #39d98a;
+      }
+      body.focus .grid {
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+      }
+      body.focus .tile {
+        grid-column: span 3;
+      }
+      body.focus .tile.focused {
+        grid-column: span 6;
+      }
       button {
         background: #12314d;
         color: #e4f0ff;
@@ -205,6 +234,14 @@ async function main() {
         <input id="fillScreen" type="checkbox" />
       </div>
       <div class="control">
+        <span class="label">Auto Focus</span>
+        <input id="autofocus" type="checkbox" />
+      </div>
+      <div class="control">
+        <span class="label">Face Detect</span>
+        <input id="facedetect" type="checkbox" />
+      </div>
+      <div class="control">
         <button id="audioArmBtn">Enable Audio</button>
         <span id="audioStatus" class="label">click to allow unmute on hover</span>
       </div>
@@ -231,6 +268,8 @@ async function main() {
       const grid = document.getElementById("grid");
       const hoverAudioEl = document.getElementById("hoverAudio");
       const fillScreenEl = document.getElementById("fillScreen");
+      const autoFocusEl = document.getElementById("autofocus");
+      const faceDetectEl = document.getElementById("facedetect");
       const audioArmBtn = document.getElementById("audioArmBtn");
       const audioStatus = document.getElementById("audioStatus");
       const rateEl = document.getElementById("rate");
@@ -239,6 +278,18 @@ async function main() {
       const sessions = [];
       let activeAudioCameraId = null;
       let audioArmed = false;
+      let focusedCameraId = null;
+      const motionThreshold = 12;
+      const frameWidth = 80;
+      const frameHeight = 45;
+      const hasFaceDetector = typeof window.FaceDetector !== "undefined";
+      const faceDetector = hasFaceDetector
+        ? new window.FaceDetector({ fastMode: true, maxDetectedFaces: 6 })
+        : null;
+
+      if (!hasFaceDetector) {
+        faceDetectEl.disabled = true;
+      }
 
       function applyBasePlaybackRate() {
         const base = Number(rateEl.value || "1");
@@ -263,6 +314,14 @@ async function main() {
 
       function setAudioStatus(text) {
         audioStatus.textContent = text;
+      }
+
+      function setFocusedCamera(cameraId) {
+        focusedCameraId = cameraId;
+        document.body.classList.toggle("focus", Boolean(cameraId));
+        for (const s of sessions) {
+          s.tile.classList.toggle("focused", s.camera.id === cameraId);
+        }
       }
 
       async function armAudio() {
@@ -325,13 +384,58 @@ async function main() {
         }, 1000);
       }
 
+      function analyzeMotion(session) {
+        if (!session.canvasCtx || session.video.readyState < 2) {
+          return;
+        }
+        const ctx = session.canvasCtx;
+        ctx.drawImage(session.video, 0, 0, frameWidth, frameHeight);
+        const data = ctx.getImageData(0, 0, frameWidth, frameHeight).data;
+        const gray = new Uint8Array(frameWidth * frameHeight);
+        for (let i = 0, j = 0; i < data.length; i += 4, j += 1) {
+          gray[j] = (data[i] * 3 + data[i + 1] * 4 + data[i + 2]) >> 3;
+        }
+        if (session.prevGray) {
+          let diff = 0;
+          for (let i = 0; i < gray.length; i += 1) {
+            diff += Math.abs(gray[i] - session.prevGray[i]);
+          }
+          session.motionScore = diff / gray.length;
+          session.motionEl.textContent = "M " + session.motionScore.toFixed(1);
+        }
+        session.prevGray = gray;
+      }
+
+      async function analyzeFaces(session) {
+        if (!faceDetector || !faceDetectEl.checked || session.video.readyState < 2) {
+          session.faceEl.textContent = "F -";
+          return;
+        }
+        const now = Date.now();
+        if (now - session.lastFaceAt < 1200) {
+          return;
+        }
+        session.lastFaceAt = now;
+        try {
+          const faces = await faceDetector.detect(session.video);
+          session.faceCount = faces.length;
+          session.faceEl.textContent = "F " + String(faces.length);
+        } catch (_e) {
+          session.faceEl.textContent = "F ?";
+        }
+      }
+
       for (const camera of cameras) {
         const tile = document.createElement("section");
         tile.className = "tile";
         tile.innerHTML = \`
           <div class="tile-head">
             <div>\${camera.name}</div>
-            <div class="latency live">live</div>
+            <div class="meta">
+              <span class="motion">M 0.0</span>
+              <span class="faces">F -</span>
+              <span class="latency live">live</span>
+            </div>
           </div>
           <div class="video-wrap">
             <video autoplay muted playsinline controls></video>
@@ -342,8 +446,26 @@ async function main() {
 
         const video = tile.querySelector("video");
         const latencyEl = tile.querySelector(".latency");
+        const motionEl = tile.querySelector(".motion");
+        const faceEl = tile.querySelector(".faces");
         const hls = attachStream(video, camera.url, latencyEl);
-        const session = { camera, video, hls, latencyEl };
+        const canvas = document.createElement("canvas");
+        canvas.width = frameWidth;
+        canvas.height = frameHeight;
+        const session = {
+          camera,
+          tile,
+          video,
+          hls,
+          latencyEl,
+          motionEl,
+          faceEl,
+          canvasCtx: canvas.getContext("2d", { willReadFrequently: true }),
+          prevGray: null,
+          motionScore: 0,
+          faceCount: 0,
+          lastFaceAt: 0
+        };
         sessions.push(session);
 
         video.addEventListener("loadedmetadata", () => {
@@ -386,6 +508,11 @@ async function main() {
       fillScreenEl.addEventListener("change", () => {
         document.body.classList.toggle("fill", fillScreenEl.checked);
       });
+      autoFocusEl.addEventListener("change", () => {
+        if (!autoFocusEl.checked) {
+          setFocusedCamera(null);
+        }
+      });
 
       document.addEventListener("visibilitychange", () => {
         for (const s of sessions) {
@@ -394,6 +521,28 @@ async function main() {
           }
         }
       });
+
+      setInterval(() => {
+        for (const s of sessions) {
+          analyzeMotion(s);
+          analyzeFaces(s);
+        }
+        if (!autoFocusEl.checked) {
+          return;
+        }
+        let best = null;
+        for (const s of sessions) {
+          if (!best || s.motionScore > best.motionScore) {
+            best = s;
+          }
+        }
+        if (!best || best.motionScore < motionThreshold) {
+          return;
+        }
+        if (focusedCameraId !== best.camera.id) {
+          setFocusedCamera(best.camera.id);
+        }
+      }, 500);
     </script>
   </body>
 </html>`);
