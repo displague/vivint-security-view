@@ -1,0 +1,20 @@
+{
+  "name": "vivint-google-home-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local RTSP/HLS proxy plus Google Smart Home camera webhook scaffold.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.2",
+    "morgan": "^1.10.1"
+  }
+}

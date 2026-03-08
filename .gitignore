@@ -1,0 +1,6 @@
+settings.json
+references
+streams
+node_modules/
+.env
+*.log
