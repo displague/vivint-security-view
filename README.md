@@ -55,8 +55,9 @@ Features:
 - playback rate selector (1.0x to 2.0x)
 - auto catch-up mode for reduced live lag
 - fill-screen mode for larger feed area
-- auto-focus mode that highlights the camera with strongest detected motion
+- focus view modes: `all`, `1`, `2`, `4` (top moving cameras)
 - optional browser face detection overlay count (when FaceDetector API is supported)
+- signal-loss overlay with automatic reconnect when the server comes back
 
 ## Camera Config
 

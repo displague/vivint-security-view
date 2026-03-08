@@ -187,15 +187,8 @@ async function main() {
         transform: none;
         border-color: #39d98a;
       }
-      body.focus .grid {
-        grid-template-columns: repeat(12, minmax(0, 1fr));
-      }
-      body.focus .tile {
-        grid-column: span 3;
-      }
-      body.focus .tile.focused {
-        grid-column: span 6;
-      }
+      body.focus .tile.hidden { display: none; }
+      body.focus .tile.focused { border-color: #39d98a; }
       button {
         background: #12314d;
         color: #e4f0ff;
@@ -219,6 +212,33 @@ async function main() {
       @media (max-width: 700px) {
         .grid { grid-template-columns: 1fr; }
       }
+      .signal-loss {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        background: rgba(5, 8, 12, 0.86);
+        backdrop-filter: blur(3px);
+        z-index: 999;
+      }
+      .signal-loss.show { display: flex; }
+      .signal-loss-card {
+        border: 1px solid #35506f;
+        background: #0f1b2a;
+        border-radius: 12px;
+        padding: 18px 22px;
+        min-width: 280px;
+      }
+      .signal-title {
+        font-size: 18px;
+        margin-bottom: 8px;
+      }
+      .signal-sub {
+        color: var(--muted);
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
@@ -234,12 +254,17 @@ async function main() {
         <input id="fillScreen" type="checkbox" />
       </div>
       <div class="control">
-        <span class="label">Auto Focus</span>
-        <input id="autofocus" type="checkbox" />
-      </div>
-      <div class="control">
         <span class="label">Face Detect</span>
         <input id="facedetect" type="checkbox" />
+      </div>
+      <div class="control">
+        <span class="label">Focus View</span>
+        <select id="focusMode">
+          <option value="all">all</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="4">4</option>
+        </select>
       </div>
       <div class="control">
         <button id="audioArmBtn">Enable Audio</button>
@@ -261,6 +286,12 @@ async function main() {
       </div>
     </div>
     <div id="grid" class="grid"></div>
+    <div id="signalLoss" class="signal-loss">
+      <div class="signal-loss-card">
+        <div class="signal-title">Signal Lost</div>
+        <div class="signal-sub">Attempting reconnect. This view will refresh when the server is back.</div>
+      </div>
+    </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
     <script>
@@ -268,12 +299,13 @@ async function main() {
       const grid = document.getElementById("grid");
       const hoverAudioEl = document.getElementById("hoverAudio");
       const fillScreenEl = document.getElementById("fillScreen");
-      const autoFocusEl = document.getElementById("autofocus");
       const faceDetectEl = document.getElementById("facedetect");
+      const focusModeEl = document.getElementById("focusMode");
       const audioArmBtn = document.getElementById("audioArmBtn");
       const audioStatus = document.getElementById("audioStatus");
       const rateEl = document.getElementById("rate");
       const catchupEl = document.getElementById("catchup");
+      const signalLossEl = document.getElementById("signalLoss");
 
       const sessions = [];
       let activeAudioCameraId = null;
@@ -286,6 +318,7 @@ async function main() {
       const faceDetector = hasFaceDetector
         ? new window.FaceDetector({ fastMode: true, maxDetectedFaces: 6 })
         : null;
+      let wasServerOffline = false;
 
       if (!hasFaceDetector) {
         faceDetectEl.disabled = true;
@@ -318,10 +351,14 @@ async function main() {
 
       function setFocusedCamera(cameraId) {
         focusedCameraId = cameraId;
-        document.body.classList.toggle("focus", Boolean(cameraId));
+        document.body.classList.toggle("focus", Boolean(cameraId) && focusModeEl.value !== "all");
         for (const s of sessions) {
           s.tile.classList.toggle("focused", s.camera.id === cameraId);
         }
+      }
+
+      function showSignalLoss(show) {
+        signalLossEl.classList.toggle("show", show);
       }
 
       async function armAudio() {
@@ -382,6 +419,44 @@ async function main() {
             session.video.playbackRate = baseRate;
           }
         }, 1000);
+      }
+
+      async function checkServerOnline() {
+        try {
+          const r = await fetch("/healthz", { cache: "no-store" });
+          return r.ok;
+        } catch (_e) {
+          return false;
+        }
+      }
+
+      function applyFocusMode() {
+        const mode = focusModeEl.value;
+        if (mode === "all") {
+          document.body.classList.remove("focus");
+          for (const s of sessions) {
+            s.tile.classList.remove("hidden");
+            s.tile.classList.remove("focused");
+            s.tile.style.order = "";
+          }
+          return;
+        }
+
+        const count = Number(mode);
+        if (!Number.isFinite(count) || count <= 0) {
+          return;
+        }
+        const sorted = [...sessions].sort((a, b) => b.motionScore - a.motionScore);
+        const top = sorted.slice(0, count);
+        const topIds = new Set(top.map((s) => s.camera.id));
+        document.body.classList.add("focus");
+
+        for (const s of sessions) {
+          const inTop = topIds.has(s.camera.id);
+          s.tile.classList.toggle("hidden", !inTop);
+          s.tile.classList.toggle("focused", inTop);
+          s.tile.style.order = inTop ? String(top.findIndex((x) => x.camera.id === s.camera.id)) : "";
+        }
       }
 
       function analyzeMotion(session) {
@@ -508,11 +583,7 @@ async function main() {
       fillScreenEl.addEventListener("change", () => {
         document.body.classList.toggle("fill", fillScreenEl.checked);
       });
-      autoFocusEl.addEventListener("change", () => {
-        if (!autoFocusEl.checked) {
-          setFocusedCamera(null);
-        }
-      });
+      focusModeEl.addEventListener("change", applyFocusMode);
 
       document.addEventListener("visibilitychange", () => {
         for (const s of sessions) {
@@ -527,9 +598,6 @@ async function main() {
           analyzeMotion(s);
           analyzeFaces(s);
         }
-        if (!autoFocusEl.checked) {
-          return;
-        }
         let best = null;
         for (const s of sessions) {
           if (!best || s.motionScore > best.motionScore) {
@@ -537,12 +605,26 @@ async function main() {
           }
         }
         if (!best || best.motionScore < motionThreshold) {
-          return;
-        }
-        if (focusedCameraId !== best.camera.id) {
-          setFocusedCamera(best.camera.id);
+          applyFocusMode();
+        } else {
+          if (focusedCameraId !== best.camera.id) {
+            setFocusedCamera(best.camera.id);
+          }
+          applyFocusMode();
         }
       }, 500);
+
+      setInterval(async () => {
+        const online = await checkServerOnline();
+        if (!online) {
+          wasServerOffline = true;
+          showSignalLoss(true);
+          return;
+        }
+        if (wasServerOffline) {
+          location.reload();
+        }
+      }, 2000);
     </script>
   </body>
 </html>`);
