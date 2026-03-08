@@ -1,4 +1,5 @@
 $namespace = "vivint-bridge"
+$env:KUBECONFIG = ".kube.config"
 
 # Copy this file to apply-secrets.ps1 and fill in the real values locally.
 $googleClientId = "paste-google-client-id"
