@@ -1,0 +1,20 @@
+# Home-network-only route: host vivint.local on the cluster's LAN ingress controller (traefik here;
+# change ingressClassName to match yours). An mDNS publisher that watches Ingresses, such as
+# external-mdns, answers vivint.local on the LAN. No public DNS, no TLS, no external-dns.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vivint-lan
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: vivint.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vivint
+                port:
+                  name: http

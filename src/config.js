@@ -161,6 +161,15 @@ function loadConfig() {
   const enableSecurityView = parseBoolean(process.env.ENABLE_SECURITY_VIEW, true);
   const enableRootIndex = parseBoolean(process.env.ENABLE_ROOT_INDEX, true);
   const appMode = process.env.APP_MODE || "hybrid";
+  // lan: home network only. The Google Smart Home and OAuth bridge routes are not served.
+  const googleHomeRoutesEnabled = appMode !== "lan";
+  const keepalive = parseBoolean(process.env.STREAM_KEEPALIVE, false);
+  const rtspTimeoutSeconds = parsePositiveInt(process.env.RTSP_TIMEOUT_SECONDS, 15);
+  const googleSignInEnabled = parseBoolean(process.env.GOOGLE_SIGNIN_ENABLED, false);
+  const googleSignInAllowedEmails = String(process.env.GOOGLE_SIGNIN_ALLOWED_EMAILS || "")
+    .split(/[\s,]+/)
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
 
   return {
     port,
@@ -181,6 +190,24 @@ function loadConfig() {
     enableSecurityView,
     enableRootIndex,
     appMode,
+    googleHomeRoutesEnabled,
+    keepalive,
+    rtspTimeoutSeconds,
+    googleSignIn: {
+      enabled: googleSignInEnabled,
+      clientId: process.env.GOOGLE_SIGNIN_CLIENT_ID || "",
+      clientSecret: process.env.GOOGLE_SIGNIN_CLIENT_SECRET || "",
+      redirectUrl: process.env.GOOGLE_SIGNIN_REDIRECT_URL || "",
+      allowedEmails: googleSignInAllowedEmails,
+      sessionSecret: process.env.SESSION_SECRET || "",
+      sessionTtlSeconds: parsePositiveInt(process.env.SESSION_TTL_SECONDS, 7 * 24 * 3600)
+    },
+    tls: {
+      certFile: process.env.TLS_CERT_FILE || "",
+      keyFile: process.env.TLS_KEY_FILE || "",
+      port: parsePositiveInt(process.env.HTTPS_PORT, 8443)
+    },
+    settingsPath: selectSettingsPath(),
     streamSourcePreference,
     streamRoot,
     cameras: settings?.cameras || loadCameras()

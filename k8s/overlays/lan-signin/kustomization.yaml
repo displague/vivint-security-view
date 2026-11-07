@@ -1,0 +1,19 @@
+# Opt-in: the lan overlay plus the Google sign-in gate and its https name.
+# Apply this instead of ../lan only after the vivint-signin Secret has a Google client (see README.md).
+# vivint.home.example.com and the Gateway reference are placeholders: patch them in your own overlay.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../lan
+  - httproute.yaml
+
+patches:
+  - target: { kind: ConfigMap, name: vivint-bridge-config }
+    patch: |
+      - op: replace
+        path: /data/GOOGLE_SIGNIN_ENABLED
+        value: "1"
+      - op: replace
+        path: /data/BASE_URL
+        value: https://vivint.home.example.com

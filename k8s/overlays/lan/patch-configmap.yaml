@@ -1,0 +1,21 @@
+- op: replace
+  path: /data
+  value:
+    APP_MODE: lan
+    PORT: "8080"
+    BASE_URL: http://vivint.local
+    ENABLE_ROOT_INDEX: "1"
+    ENABLE_SECURITY_VIEW: "1"
+    # The cluster sits on the home network, so it pulls the panel directly.
+    STREAM_SOURCE_PREFERENCE: internal
+    # Always-on pull of every camera, with per-camera restart and backoff.
+    STREAM_KEEPALIVE: "1"
+    RTSP_TIMEOUT_SECONDS: "15"
+    # Copy H.264 instead of re-encoding: one x264 encode per camera would swamp a small arm64 node.
+    STREAM_TRANSCODE: "0"
+    HLS_SEGMENT_TIME: "2"
+    HLS_LIST_SIZE: "4"
+    # Optional Google sign-in gate, built but off. Its client, allowlist and session key
+    # come from the vivint-signin Secret. See k8s/overlays/lan-signin/README.md before turning it on.
+    GOOGLE_SIGNIN_ENABLED: "0"
+    GOOGLE_SIGNIN_REDIRECT_URL: https://vivint.home.example.com/auth/callback

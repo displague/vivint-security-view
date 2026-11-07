@@ -1,8 +1,10 @@
 node_modules/
 references/
-scripts/
+scripts/*
+!scripts/refresh_vivint_rtsp_urls.js
 streams/
 settings.json
 .env
 .git
 *.log
+k8s/overlays/*/secrets.local.yaml

@@ -1,13 +1,16 @@
+const fs = require("fs");
+const https = require("https");
 const path = require("path");
 const express = require("express");
 const morgan = require("morgan");
+const { createGoogleSignIn } = require("./google-signin");
 const {
   loadConfig,
   loadSettingsDocument,
   reloadIntoConfig,
   saveSettingsDocument
 } = require("./config");
-const { StreamManager } = require("./stream-manager");
+const { StreamManager, redactRtsp } = require("./stream-manager");
 const { createSmartHomeHandler } = require("./google-smart-home");
 const { OAuthStore } = require("./oauth-store");
 const {
@@ -159,6 +162,7 @@ async function main() {
   const config = loadConfig();
   const streamManager = new StreamManager(config, log);
   const oauthStore = new OAuthStore(config);
+  const googleSignIn = createGoogleSignIn({ config, logger: log });
   const pendingVivintRefreshes = new Map();
   await streamManager.init();
 
@@ -191,15 +195,26 @@ async function main() {
     return entry;
   }
 
+  function cameraFingerprint(cameras) {
+    return JSON.stringify(cameras.map((camera) => [camera.id, camera.name, camera.rtspUrl]));
+  }
+
+  async function restartStreamsFromSettings() {
+    streamManager.stopAll();
+    reloadIntoConfig(config);
+    await streamManager.init();
+    if (config.keepalive) {
+      await streamManager.startAll();
+    }
+  }
+
   async function applyRefreshedCameraDocument(document, cameras) {
     const next = {
       ...(document || {}),
       cameras: mergeCameraRecords(document?.cameras, cameras)
     };
     const savedPath = saveSettingsDocument(next);
-    streamManager.stopAll();
-    reloadIntoConfig(config);
-    await streamManager.init();
+    await restartStreamsFromSettings();
     return {
       ok: true,
       updatedSettingsPath: savedPath,
@@ -211,15 +226,139 @@ async function main() {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false }));
-  app.use(morgan("dev"));
+  // Keep stream tokens and OAuth codes out of request logs.
+  morgan.token("safe-url", (req) =>
+    String(req.originalUrl || req.url).replace(
+      /([?&](?:token|code|state|access_token)=)[^&]*/gi,
+      "$1***"
+    )
+  );
+  app.use(
+    morgan(":method :safe-url :status :response-time ms - :res[content-length]")
+  );
+
+  if (!config.googleHomeRoutesEnabled) {
+    // LAN mode: the Google Smart Home bridge and its OAuth server are not served at all.
+    app.use((req, res, next) => {
+      if (/^\/(smarthome|oauth|google)(\/|$)/.test(req.path)) {
+        return res.status(404).send("Not found");
+      }
+      return next();
+    });
+  }
+
+  app.use(googleSignIn.middleware);
+  googleSignIn.register(app);
+
+  function settingsUpdatedAt() {
+    try {
+      return new Date(fs.statSync(config.settingsPath).mtimeMs).toISOString();
+    } catch {
+      return null;
+    }
+  }
+
+  // The panel RTSP credential carries no expiry. It is judged by whether the panel accepts it.
+  function healthSummary() {
+    const cameras = streamManager.health();
+    const live = cameras.filter((camera) => camera.status === "live").length;
+    const attempted = cameras.filter((camera) => camera.status !== "idle");
+    const rejected = attempted.filter((camera) => camera.lastFailure === "auth_failed");
+    let credentialState = "unknown";
+    if (live > 0) {
+      credentialState = "accepted";
+    } else if (attempted.length > 0 && rejected.length === attempted.length) {
+      credentialState = "rejected";
+    }
+    if (live > 0) {
+      lastCredentialAcceptedAt = new Date().toISOString();
+    }
+    return {
+      ok: true,
+      appMode: config.appMode,
+      keepalive: config.keepalive,
+      signInRequired: googleSignIn.enabled,
+      googleHomeRoutes: config.googleHomeRoutesEnabled,
+      googleOAuthConfigured: config.googleHomeRoutesEnabled ? oauthStore.isConfigured() : false,
+      camerasLive: live,
+      camerasTotal: cameras.length,
+      credential: {
+        kind: "panel-rtsp",
+        expiresAt: null,
+        expiryNote: "The panel issues no expiry; a rejected credential shows as auth_failed on every camera.",
+        state: credentialState,
+        needsRefresh: credentialState === "rejected",
+        lastAcceptedAt: lastCredentialAcceptedAt,
+        settingsUpdatedAt: settingsUpdatedAt()
+      },
+      cameras
+    };
+  }
+
+  let lastCredentialAcceptedAt = null;
 
   app.get("/healthz", (req, res) => {
-    res.json({
-      ok: true,
-      cameras: config.cameras.map((c) => c.id),
-      googleOAuthConfigured: oauthStore.isConfigured(),
-      appMode: config.appMode
-    });
+    // Always 200 so a dead camera never restarts the pod; read the body for camera state.
+    res.json(healthSummary());
+  });
+
+  app.get("/health", (req, res) => {
+    const summary = healthSummary();
+    const when = (value) => (value ? escapeHtml(value.replace("T", " ").replace(/\..*$/, "Z")) : "-");
+    const rows = summary.cameras
+      .map(
+        (camera) => `<tr class="${escapeHtml(camera.status)}">
+          <td>${escapeHtml(camera.id)}</td>
+          <td>${escapeHtml(camera.name)}</td>
+          <td><span class="badge">${escapeHtml(camera.status)}</span></td>
+          <td>${when(camera.lastSegmentAt)}</td>
+          <td>${escapeHtml(camera.lastFailure || "-")}<br><small>${when(camera.lastFailureAt)}</small></td>
+          <td>${escapeHtml(String(camera.restarts))}</td>
+          <td>${when(camera.nextRetryAt)}</td>
+        </tr>`
+      )
+      .join("");
+    const credential = summary.credential;
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="15" />
+    <title>Camera Health</title>
+    <style>
+      body { font-family: system-ui, sans-serif; background: #0b0f14; color: #e6edf3; margin: 0; padding: 16px; }
+      h1 { font-size: 1.3rem; }
+      .card { background: #111923; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; }
+      .table-wrap { overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; min-width: 640px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #22303f; vertical-align: top; }
+      small { color: #8b98a5; }
+      .badge { padding: 2px 8px; border-radius: 999px; background: #22303f; }
+      tr.live .badge { background: #1f6f43; }
+      tr.starting .badge { background: #6b5b1a; }
+      tr.backoff .badge, tr.down .badge { background: #7a2630; }
+      .warn { color: #ff9b9b; font-weight: 600; }
+      a { color: #6cb6ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Camera health</h1>
+    <div class="card">
+      <div>${summary.camerasLive} of ${summary.camerasTotal} cameras live. Mode ${escapeHtml(summary.appMode)}, keepalive ${summary.keepalive ? "on" : "off"}, sign-in ${summary.signInRequired ? "required" : "off"}.</div>
+      <div>Panel credential: <strong class="${credential.needsRefresh ? "warn" : ""}">${escapeHtml(credential.state)}</strong>${credential.needsRefresh ? " - run the Vivint refresh" : ""}. Last accepted ${when(credential.lastAcceptedAt)}. Settings updated ${when(credential.settingsUpdatedAt)}.</div>
+      <div><small>${escapeHtml(credential.expiryNote)}</small></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Camera</th><th>State</th><th>Last segment</th><th>Last failure</th><th>Restarts</th><th>Next retry</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p><a href="/security">Security view</a> · <a href="/healthz">JSON</a></p>
+  </body>
+</html>`);
   });
 
   app.get("/", (req, res) => {
@@ -1635,10 +1774,11 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
     const ready = await streamManager.waitForPlaylist(cameraId, 10000);
     if (!ready) {
       const status = streamManager.getStatus(cameraId);
-      const reason =
+      const reason = redactRtsp(
         status?.startError?.message ||
-        status?.lastStderr ||
-        "stream not ready yet";
+          status?.lastStderr ||
+          "stream not ready yet"
+      );
       return res.status(503).json({
         error: "streamUnavailable",
         cameraId,
@@ -1646,6 +1786,15 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
       });
     }
 
+    if (req.query.token) {
+      // Carry the token onto segment URLs so token-only clients get past the sign-in gate.
+      const playlist = await fs.promises.readFile(streamManager.playlistPath(cameraId), "utf8");
+      const suffix = `?token=${encodeURIComponent(String(req.query.token))}`;
+      res.setHeader("content-type", "application/vnd.apple.mpegurl");
+      return res.send(
+        playlist.replace(/^(?!#)(\S+\.ts)$/gm, (segment) => `${segment}${suffix}`)
+      );
+    }
     return res.sendFile(streamManager.playlistPath(cameraId));
   });
 
@@ -1668,11 +1817,55 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
     log.info(`Bridge listening on port ${config.port}`);
     log.info(`Base URL: ${config.baseUrl}`);
     log.info(`Cameras: ${config.cameras.map((c) => c.id).join(", ")}`);
+    log.info(
+      `Mode ${config.appMode}; keepalive ${config.keepalive ? "on" : "off"}; Google sign-in ${googleSignIn.enabled ? "on" : "off"}`
+    );
   });
+
+  let httpsServer = null;
+  if (config.tls.certFile && config.tls.keyFile) {
+    httpsServer = https
+      .createServer(
+        {
+          cert: fs.readFileSync(config.tls.certFile),
+          key: fs.readFileSync(config.tls.keyFile)
+        },
+        app
+      )
+      .listen(config.tls.port, () => {
+        log.info(`HTTPS listening on port ${config.tls.port}`);
+      });
+  }
+
+  if (config.keepalive) {
+    await streamManager.startAll();
+  }
+
+  // Pick up settings written outside this process, such as the refresh CLI run with kubectl exec.
+  if (fs.existsSync(config.settingsPath)) {
+    fs.watchFile(config.settingsPath, { interval: 15000 }, () => {
+      let next;
+      try {
+        next = loadConfig();
+      } catch (error) {
+        log.error(`settings.json changed but could not be loaded: ${redactRtsp(error.message)}`);
+        return;
+      }
+      if (cameraFingerprint(next.cameras) === cameraFingerprint(config.cameras)) {
+        return;
+      }
+      log.info("settings.json changed; restarting camera streams");
+      restartStreamsFromSettings().catch((error) => {
+        log.error(`stream restart failed: ${redactRtsp(error.message)}`);
+      });
+    });
+  }
 
   function shutdown() {
     log.info("Shutting down...");
+    fs.unwatchFile(config.settingsPath);
     streamManager.stopAll();
+    httpsServer?.close();
     server.close(() => process.exit(0));
   }
 

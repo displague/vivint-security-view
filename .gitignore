@@ -10,3 +10,6 @@ k8s/apply-secrets.ps1
 k8s/settings.public.json
 k8s/overlays/local/
 .kube.config
+
+# Overlay Secrets written by scripts/make_lan_secrets.js
+k8s/overlays/*/secrets.local.yaml

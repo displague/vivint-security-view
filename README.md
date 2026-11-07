@@ -43,6 +43,20 @@ This means Google must reach this service over HTTPS and account linking must be
 
 - `hybrid` (default): local viewer, local bridge, Google endpoints all enabled
 - `public-bridge`: intended for public HTTPS deployment; disable the local viewer routes and serve only OAuth, Smart Home, and stream endpoints
+- `lan`: home network only. The Google Smart Home and OAuth routes are not served. Used by `k8s/overlays/lan`.
+
+Ingest and health flags:
+
+- `STREAM_KEEPALIVE=1`: pull every camera continuously and restart dropped ones with backoff (5 s to 5 min)
+- `RTSP_TIMEOUT_SECONDS=15`: ffmpeg exits when the panel connection stalls this long
+- `/healthz` (JSON, always 200) and `/health` (page) report per-camera state and whether the panel credential is still accepted
+
+Optional Google sign-in gate (off unless `GOOGLE_SIGNIN_ENABLED=1`):
+
+- `GOOGLE_SIGNIN_CLIENT_ID`, `GOOGLE_SIGNIN_CLIENT_SECRET`, `GOOGLE_SIGNIN_REDIRECT_URL` (https only; Google rejects `.local`)
+- `GOOGLE_SIGNIN_ALLOWED_EMAILS` (comma-separated), `SESSION_SECRET` (32+ characters), `SESSION_TTL_SECONDS`
+- `TLS_CERT_FILE`, `TLS_KEY_FILE`, `HTTPS_PORT`: optional HTTPS listener when TLS isn't terminated in front of the app
+- See `k8s/overlays/lan-signin/README.md`
 
 Relevant env flags:
 
@@ -191,6 +205,8 @@ This repo includes manifests under `k8s/` for a dedicated namespace:
 - `k8s/secret.example.yaml`
 - `k8s/kustomization.yaml`
 - `k8s/overlays/example/`
+- `k8s/overlays/lan/`: home-network-only ingest at `vivint.local` (see its README)
+- `k8s/overlays/lan-signin/`: the same with the optional Google sign-in gate on
 
 Intended split:
 

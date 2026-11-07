@@ -1,0 +1,14 @@
+# ClusterIP, reached through lan-ingress.yaml. Many clusters already have the ingress controller
+# on port 80 of their LAN address, so a LoadBalancer Service on :80 could not get one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vivint
+spec:
+  type: ClusterIP
+  selector:
+    app: vivint-bridge
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

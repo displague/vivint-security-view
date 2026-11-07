@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vivint-bridge
+  namespace: vivint-bridge
+spec:
+  # One puller only: the panel shouldn't be pulled twice, and the settings PVC is ReadWriteOnce.
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # Copy the panel settings from the Secret onto the PVC once. Later refreshes write the PVC.
+        - name: seed-settings
+          image: replace-me/vivint-google-home-bridge:latest
+          command:
+            - sh
+            - -c
+            - |
+              if [ -s /data/settings.json ]; then
+                echo "settings.json already on the volume; keeping it"
+              else
+                cp /seed/settings.json /data/settings.json && chmod 600 /data/settings.json
+                echo "seeded settings.json from the vivint-panel Secret"
+              fi
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: seed, mountPath: /seed, readOnly: true }
+      containers:
+        - name: vivint-bridge
+          envFrom:
+            - configMapRef: { name: vivint-bridge-config }
+            - secretRef: { name: vivint-app }
+            - secretRef: { name: vivint-signin, optional: true }
+          env:
+            - name: SETTINGS_FILE
+              value: /data/settings.json
+          volumeMounts:
+            - mountPath: /var/run/vivint-bridge
+              $patch: delete
+            - { name: data, mountPath: /data }
+            - { name: streams, mountPath: /app/streams }
+          resources:
+            requests: { cpu: 200m, memory: 192Mi }
+            limits: { cpu: "2", memory: 768Mi }
+      volumes:
+        - name: camera-config
+          $patch: delete
+        - name: data
+          persistentVolumeClaim: { claimName: vivint-settings }
+        - name: seed
+          secret: { secretName: vivint-panel, defaultMode: 0440 }
+        # HLS segments are short-lived; keep them in memory, off the node's storage.
+        - name: streams
+          emptyDir: { medium: Memory, sizeLimit: 128Mi }

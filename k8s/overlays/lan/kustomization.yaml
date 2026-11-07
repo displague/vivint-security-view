@@ -1,0 +1,41 @@
+# Home-network-only Vivint ingest.
+# No public Ingress, no external-dns, no Google Smart Home or OAuth routes (APP_MODE=lan).
+# The viewer answers at vivint.local through the LAN-only Ingress "vivint-lan" (lan-ingress.yaml).
+# Secrets are not in git: scripts/make_lan_secrets.js writes them to secrets.local.yaml (ignored).
+# Cluster-specific settings (node placement, hostnames) belong in your own overlay on top of this
+# one, for example under the git-ignored k8s/overlays/local/.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vivint
+
+resources:
+  - ../../base
+  - pvc.yaml
+  - service.yaml
+  - lan-ingress.yaml
+
+images:
+  - name: replace-me/vivint-google-home-bridge
+    newName: ghcr.io/displague/vivint-security-view
+    newTag: latest
+
+patches:
+  # Drop the public bridge's Ingress (and its external-dns hostname) and its Service.
+  - target: { kind: Ingress, name: vivint-bridge }
+    patch: |
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata: { name: vivint-bridge }
+  - target: { kind: Service, name: vivint-bridge }
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: { name: vivint-bridge }
+  - target: { kind: ConfigMap, name: vivint-bridge-config }
+    path: patch-configmap.yaml
+  - path: patch-deployment.yaml
+
+# The optional Google sign-in route lives in ../lan-signin and is not included here.
