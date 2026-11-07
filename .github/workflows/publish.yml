@@ -114,6 +114,7 @@ jobs:
             type=sha,format=short,enable=${{ !inputs.tag }}
           labels: |
             org.opencontainers.image.description=Home-network viewer and always-on HLS ingest for a Vivint panel
+            org.opencontainers.image.licenses=MIT
 
       - name: Build and push
         uses: docker/build-push-action@v6
