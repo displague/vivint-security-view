@@ -10,6 +10,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Rebuild the image for an existing release tag (for example v1.2.3) instead of releasing
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -36,7 +41,7 @@ jobs:
           npx commitlint --from "$FROM" --to "$TO" --verbose
 
   release:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.tag
     needs: commitlint
     runs-on: ubuntu-latest
     permissions:
@@ -55,23 +60,35 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx semantic-release
+      # semantic-release created the tag in this checkout, so no fetch is needed.
       - name: Version released on this commit, if any
         id: version
         run: |
-          git fetch --tags --force --quiet
           tag=$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n1)
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "released: ${tag:-none}"
 
   image:
-    if: github.event_name != 'pull_request'
     needs: release
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.release.result == 'success' || inputs.tag != '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+
+      - name: Version to tag
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+          RELEASED: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -n "$TAG" ]; then v="${TAG#v}"; else v="$RELEASED"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version: ${v:-none}"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -89,10 +106,10 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
-            type=semver,pattern={{major}},value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
-            type=raw,value=latest,enable=${{ needs.release.outputs.version != '' }}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.version != '' }}
             type=raw,value=main
             type=sha,format=short
           labels: |
