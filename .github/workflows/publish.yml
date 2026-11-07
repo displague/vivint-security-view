@@ -123,3 +123,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # arm64 builds under QEMU, where installing ffmpeg alone takes minutes. Cache layers so
+          # only layers whose inputs changed (usually just src/) rebuild.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
