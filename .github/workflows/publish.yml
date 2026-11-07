@@ -90,7 +90,6 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "version: ${v:-none}"
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -124,7 +123,20 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # arm64 builds under QEMU, where installing ffmpeg alone takes minutes. Cache layers so
-          # only layers whose inputs changed (usually just src/) rebuild.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The final stage only copies files, so the arm64 image needs no emulation to build.
+      - name: Smoke test (amd64)
+        env:
+          IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        run: |
+          docker run --rm --entrypoint ffmpeg "$IMAGE" -hide_banner -protocols | grep -qw rtsp
+          docker run --rm --entrypoint ffmpeg "$IMAGE" -hide_banner -muxers | grep -qw hls
+          docker run --rm --entrypoint ffmpeg "$IMAGE" -hide_banner -encoders | grep -qw libx264
+          docker run -d --name smoke -p 8080:8080 -e APP_MODE=lan "$IMAGE"
+          for i in $(seq 30); do curl -fs http://127.0.0.1:8080/healthz > /dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/smarthome)" = 404
+          docker exec smoke sh -c 'touch /app/streams/.w && rm /app/streams/.w'
+          docker rm -f smoke
