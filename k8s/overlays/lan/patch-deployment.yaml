@@ -9,6 +9,9 @@ spec:
     type: Recreate
   template:
     spec:
+      # The image is public on GHCR, so no pull secret is needed.
+      imagePullSecrets:
+        - $patch: replace
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

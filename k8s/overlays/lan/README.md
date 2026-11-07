@@ -33,8 +33,7 @@ kubectl apply -f k8s/overlays/lan/secrets.local.yaml
 | `vivint-app` | `STREAM_TOKEN` | Random token for `/stream/*`; in-cluster consumers read it here |
 | `vivint-signin` | `SESSION_SECRET`, `GOOGLE_SIGNIN_ALLOWED_EMAILS`, later the Google client | Optional sign-in gate, off |
 
-The image is private on GHCR, so the namespace also needs `ghcr-pull-secret` (a read:packages token),
-or import the image into k3s and drop `imagePullSecrets`.
+The image is public on GHCR, so this overlay drops the base's `ghcr-pull-secret`.
 
 ## Deploy
 
