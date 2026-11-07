@@ -1,52 +1,107 @@
-name: Publish Image
+name: Release
+
+# Every push to main: lint commit messages, let semantic-release decide whether the commits since
+# the last tag make a release (fix -> patch, feat -> minor, BREAKING CHANGE -> major), then build
+# the image. Released builds are tagged X.Y.Z, X.Y, X and latest; every build is tagged sha-<short>
+# and main.
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE_NAME: vivint-security-view
 
 jobs:
-  publish:
+  commitlint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - name: Lint commit messages
+        env:
+          FROM: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          TO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A new branch or a manual run has no usable "before"; check just the last commit then.
+          if [ -z "$FROM" ] || ! git cat-file -e "$FROM^{commit}" 2>/dev/null; then FROM="$TO~1"; fi
+          npx commitlint --from "$FROM" --to "$TO" --verbose
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+  release:
+    if: github.event_name != 'pull_request'
+    needs: commitlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - name: semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+      - name: Version released on this commit, if any
+        id: version
+        run: |
+          git fetch --tags --force --quiet
+          tag=$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n1)
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "released: ${tag:-none}"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  image:
+    if: github.event_name != 'pull_request'
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract image metadata
+      - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=semver,pattern={{major}},value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ needs.release.outputs.version != '' }}
+            type=raw,value=main
             type=sha,format=short
+          labels: |
+            org.opencontainers.image.description=Home-network viewer and always-on HLS ingest for a Vivint panel
 
-      - name: Build and push image
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

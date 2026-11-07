@@ -266,3 +266,14 @@ To make devices appear in Google Home, create a Google Smart Home Action:
 2. Point fulfillment to this app (publicly reachable HTTPS endpoint).
 3. Test with your own account in Google Home developer test flow.
 4. Validate stream response fields and URL reachability from Google.
+
+## Releases
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/), checked by
+commitlint in CI. On every push to `main`, semantic-release reads the commits since the last tag:
+`fix:` makes a patch release, `feat:` a minor one, and a `BREAKING CHANGE:` footer (or `!` after the
+type) a major one. Other types (`docs:`, `ci:`, `chore:`, `refactor:`, `test:`) don't release.
+
+A release creates the `vX.Y.Z` tag and GitHub release notes, and the image is pushed as
+`ghcr.io/displague/vivint-security-view:X.Y.Z`, `X.Y`, `X` and `latest`. Every build on `main` is
+also tagged `main` and `sha-<short commit>`. Pin `X.Y.Z` (or a digest) in deployments.

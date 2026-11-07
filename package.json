@@ -1,13 +1,15 @@
 {
-  "name": "vivint-google-home-bridge",
-  "version": "0.1.0",
+  "name": "vivint-security-view",
+  "version": "0.0.0-development",
   "private": true,
-  "description": "Local RTSP/HLS proxy plus Google Smart Home camera webhook scaffold.",
+  "description": "Home-network viewer and always-on HLS ingest for a Vivint panel, with an optional Google Smart Home bridge.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "refresh:vivint": "node scripts/refresh_vivint_rtsp_urls.js"
+    "refresh:vivint": "node scripts/refresh_vivint_rtsp_urls.js",
+    "release": "semantic-release",
+    "lint:commits": "commitlint --from origin/main --to HEAD"
   },
   "engines": {
     "node": ">=20"
@@ -17,5 +19,11 @@
     "express": "^4.21.2",
     "fs-extra": "^11.3.2",
     "morgan": "^1.10.1"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.4",
+    "@commitlint/config-conventional": "21.2.4",
+    "conventional-changelog-conventionalcommits": "10.4.1",
+    "semantic-release": "25.0.9"
   }
 }
