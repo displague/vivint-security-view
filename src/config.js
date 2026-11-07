@@ -38,6 +38,11 @@ function selectSettingsPath() {
   return process.env.SETTINGS_FILE || defaultSettingsPath;
 }
 
+function loadJsonFile(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  return JSON.parse(raw);
+}
+
 function loadCameras() {
   const camerasPath = selectCameraPath();
   if (!fs.existsSync(camerasPath)) {
@@ -117,8 +122,7 @@ function loadSettingsJson(sourcePreference) {
   if (!fs.existsSync(settingsPath)) {
     return null;
   }
-  const raw = fs.readFileSync(settingsPath, "utf8");
-  const parsed = JSON.parse(raw);
+  const parsed = loadJsonFile(settingsPath);
   const cameras = Array.isArray(parsed.cameras) ? parsed.cameras : [];
   if (cameras.length === 0) {
     throw new Error("settings.json contains no cameras.");
@@ -183,6 +187,33 @@ function loadConfig() {
   };
 }
 
+function loadSettingsDocument() {
+  const settingsPath = selectSettingsPath();
+  if (!fs.existsSync(settingsPath)) {
+    return null;
+  }
+  return loadJsonFile(settingsPath);
+}
+
+function saveSettingsDocument(document) {
+  const settingsPath = selectSettingsPath();
+  fs.writeFileSync(settingsPath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  return settingsPath;
+}
+
+function reloadIntoConfig(target) {
+  const next = loadConfig();
+  for (const key of Object.keys(target)) {
+    delete target[key];
+  }
+  Object.assign(target, next);
+  return target;
+}
+
 module.exports = {
-  loadConfig
+  loadConfig,
+  loadSettingsDocument,
+  reloadIntoConfig,
+  saveSettingsDocument,
+  selectSettingsPath
 };

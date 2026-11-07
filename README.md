@@ -36,6 +36,8 @@ This means Google must reach this service over HTTPS and account linking must be
 4. Optional camera config fallback:
    `Copy-Item cameras.example.json cameras.json`
 5. Set `BASE_URL` in `.env` only if not using `proxy.baseUrl` in `settings.json`.
+6. When Vivint stream tokens expire, refresh `settings.json` from the built-in `/security` UI or:
+   `npm run refresh:vivint`
 
 ## Deployment Modes
 
@@ -66,6 +68,8 @@ Google setup helper:
 
 `http://localhost:8080/google/setup`
 
+This page is only a config/status helper. If it shows `localhost`, that is not a valid Google Home callback host.
+
 Features:
 - all cameras live in one grid
 - hover over a tile to unmute that camera (others stay muted)
@@ -75,10 +79,11 @@ Features:
 - focus view modes: `all`, `1`, `2`, `4` (top moving cameras)
 - optional browser face detection with count and on-video face boxes (when FaceDetector API is supported)
 - signal-loss overlay with automatic reconnect when the server comes back
+- Vivint URL refresh flow that rewrites `settings.json` and reloads streams in place
 
 ## Camera Config
 
-Preferred: `settings.json` using the output of `scripts/get_vivint_rtsp_urls.py`.  
+Preferred: `settings.json` kept current with `npm run refresh:vivint` or the `/security` refresh button.  
 The app will pick a stream URL in this order for each camera:
 `rtspUrl` -> `internal_rtsp_hd` -> `direct_rtsp_hd` -> `internal_rtsp_sd` -> `direct_rtsp_sd` -> `external_rtsp_hd` -> `external_rtsp_sd`.
 

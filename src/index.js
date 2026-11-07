@@ -1,10 +1,21 @@
 const path = require("path");
 const express = require("express");
 const morgan = require("morgan");
-const { loadConfig } = require("./config");
+const {
+  loadConfig,
+  loadSettingsDocument,
+  reloadIntoConfig,
+  saveSettingsDocument
+} = require("./config");
 const { StreamManager } = require("./stream-manager");
 const { createSmartHomeHandler } = require("./google-smart-home");
 const { OAuthStore } = require("./oauth-store");
+const {
+  VivintClient,
+  VivintMfaRequiredError,
+  collectVivintCameraRecords,
+  mergeCameraRecords
+} = require("./vivint-refresh");
 
 function escapeHtml(value) {
   return String(value)
@@ -22,6 +33,111 @@ function oauthError(res, status, error, description) {
   return res.status(status).json({
     error,
     error_description: description
+  });
+}
+
+function buildStreamUrl(config, cameraId) {
+  const pathname = `/stream/${encodeURIComponent(String(cameraId))}/index.m3u8`;
+  if (!config.streamToken) {
+    return pathname;
+  }
+  return `${pathname}?token=${encodeURIComponent(config.streamToken)}`;
+}
+
+function invalidTokenPage(cameraId) {
+  const cameraPath = cameraId
+    ? `/camera/${encodeURIComponent(String(cameraId))}`
+    : "/";
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Invalid Stream Token</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #111923;
+        --text: #dbe7f5;
+        --muted: #90a4bf;
+        --line: #233246;
+        --warn: #f4b740;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(circle at 15% 10%, #172130 0%, var(--bg) 45%);
+        color: var(--text);
+        font-family: "Segoe UI", Tahoma, sans-serif;
+      }
+      .card {
+        width: min(520px, 92vw);
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #0e1621 0%, #0a1119 100%);
+        border-radius: 14px;
+        padding: 20px;
+      }
+      h1 { margin: 0 0 10px; font-size: 22px; }
+      p { color: var(--muted); line-height: 1.5; }
+      .pill {
+        display: inline-block;
+        color: var(--warn);
+        background: rgba(244,183,64,0.12);
+        border: 1px solid rgba(244,183,64,0.25);
+        border-radius: 999px;
+        padding: 4px 8px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 16px;
+      }
+      a {
+        color: #dbe7f5;
+        background: #12314d;
+        border: 1px solid #2e5477;
+        border-radius: 8px;
+        text-decoration: none;
+        padding: 10px 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="card">
+      <div class="pill">Invalid token</div>
+      <h1>Stream access requires the bridge token</h1>
+      <p>This is the bridge's local stream guard, not your Vivint account login. Open the security view or the single-camera viewer so the correct signed stream URL is used.</p>
+      <div class="actions">
+        <a href="${cameraPath}">Open Camera View</a>
+        <a href="/security">Open Security View</a>
+        <a href="/">Back Home</a>
+      </div>
+    </section>
+  </body>
+</html>`;
+}
+
+function isLoopbackAddress(ip) {
+  return (
+    ip === "::1" ||
+    ip === "127.0.0.1" ||
+    ip === "::ffff:127.0.0.1"
+  );
+}
+
+function localOnly(req, res, next) {
+  if (isLoopbackAddress(req.ip)) {
+    return next();
+  }
+  return res.status(403).json({
+    error: "forbidden",
+    message: "This endpoint is only available from localhost."
   });
 }
 
@@ -43,7 +159,54 @@ async function main() {
   const config = loadConfig();
   const streamManager = new StreamManager(config, log);
   const oauthStore = new OAuthStore(config);
+  const pendingVivintRefreshes = new Map();
   await streamManager.init();
+
+  function prunePendingVivintRefreshes() {
+    const now = Date.now();
+    for (const [id, entry] of pendingVivintRefreshes.entries()) {
+      if (entry.expiresAt <= now) {
+        pendingVivintRefreshes.delete(id);
+      }
+    }
+  }
+
+  function createPendingVivintRefresh(username, client) {
+    prunePendingVivintRefreshes();
+    const id = `vr_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    pendingVivintRefreshes.set(id, {
+      client,
+      username,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+    return id;
+  }
+
+  function consumePendingVivintRefresh(id) {
+    prunePendingVivintRefreshes();
+    const entry = pendingVivintRefreshes.get(id) || null;
+    if (entry) {
+      pendingVivintRefreshes.delete(id);
+    }
+    return entry;
+  }
+
+  async function applyRefreshedCameraDocument(document, cameras) {
+    const next = {
+      ...(document || {}),
+      cameras: mergeCameraRecords(document?.cameras, cameras)
+    };
+    const savedPath = saveSettingsDocument(next);
+    streamManager.stopAll();
+    reloadIntoConfig(config);
+    await streamManager.init();
+    return {
+      ok: true,
+      updatedSettingsPath: savedPath,
+      cameraCount: cameras.length,
+      cameraIds: cameras.map((camera) => camera.camera_id)
+    };
+  }
 
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -67,13 +230,251 @@ async function main() {
     const list = config.cameras
       .map(
         (camera) =>
-          `<li>${camera.name} (${camera.id}) - <a href="/stream/${camera.id}/index.m3u8">playlist</a></li>`
+          `<article class="camera-card">
+            <div class="camera-title">${escapeHtml(camera.name)}</div>
+            <div class="camera-meta">Camera ${escapeHtml(camera.id)}</div>
+            <div class="camera-actions">
+              <a href="/camera/${encodeURIComponent(camera.id)}">Open Camera</a>
+              <a href="${buildStreamUrl(config, camera.id)}">Playlist</a>
+            </div>
+          </article>`
       )
       .join("");
     res.setHeader("content-type", "text/html; charset=utf-8");
-    res.end(
-      `<h1>Vivint Local Camera Bridge</h1><p><a href="/security">Open Security View</a></p><p><a href="/google/setup">Google Setup</a></p><p><a href="/oauth/authorize?client_id=demo-client&redirect_uri=http://localhost/callback&response_type=code&state=demo">OAuth Demo</a></p><ul>${list}</ul>`
-    );
+    res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vivint Bridge</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #111923;
+        --text: #dbe7f5;
+        --muted: #90a4bf;
+        --line: #233246;
+        --accent: #39d98a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at 15% 10%, #172130 0%, var(--bg) 45%);
+        color: var(--text);
+        font-family: "Segoe UI", Tahoma, sans-serif;
+      }
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 24px 16px 32px;
+      }
+      .hero {
+        display: grid;
+        grid-template-columns: 1.3fr 1fr;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+      .panel {
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #0e1621 0%, #0a1119 100%);
+        border-radius: 14px;
+        padding: 18px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 30px;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .actions, .quick-links {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+      a {
+        color: #dbe7f5;
+        background: #12314d;
+        border: 1px solid #2e5477;
+        border-radius: 8px;
+        text-decoration: none;
+        padding: 10px 12px;
+      }
+      .accent {
+        color: #072013;
+        background: var(--accent);
+        border-color: rgba(57,217,138,0.3);
+      }
+      .camera-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 12px;
+      }
+      .camera-card {
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #0e1621 0%, #0a1119 100%);
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .camera-title {
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+      .camera-meta {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 12px;
+      }
+      .camera-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .stat {
+        color: var(--accent);
+        font-size: 26px;
+        font-weight: 800;
+      }
+      .label {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      @media (max-width: 860px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div class="panel">
+          <h1>Vivint Security Bridge</h1>
+          <p>Local security wall, single-camera viewers, and Google-facing stream proxy on one surface. Use the security wall to refresh expired Vivint camera URLs without editing settings.json manually.</p>
+          <div class="actions">
+            <a class="accent" href="/security">Open Security View</a>
+            <a href="/google/setup">Google Setup</a>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="label">Cameras</div>
+          <div class="stat">${config.cameras.length}</div>
+          <div class="quick-links">
+            <a href="/healthz">Health</a>
+            <a href="/oauth/authorize?client_id=demo-client&redirect_uri=http://localhost/callback&response_type=code&state=demo">OAuth Demo</a>
+          </div>
+        </div>
+      </section>
+      <section class="camera-grid">${list}</section>
+    </main>
+  </body>
+</html>`);
+  });
+
+  app.get("/camera/:cameraId", (req, res) => {
+    const camera = config.cameras.find((item) => item.id === req.params.cameraId);
+    if (!camera) {
+      return res.status(404).send("Camera not found");
+    }
+    const streamUrl = buildStreamUrl(config, camera.id);
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    return res.end(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(camera.name)}</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #111923;
+        --text: #dbe7f5;
+        --muted: #90a4bf;
+        --line: #233246;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at 15% 10%, #172130 0%, var(--bg) 45%);
+        color: var(--text);
+        font-family: "Segoe UI", Tahoma, sans-serif;
+      }
+      main { max-width: 1100px; margin: 0 auto; padding: 18px; }
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      a {
+        color: #dbe7f5;
+        background: #12314d;
+        border: 1px solid #2e5477;
+        border-radius: 8px;
+        text-decoration: none;
+        padding: 10px 12px;
+      }
+      .stage {
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, #0e1621 0%, #0a1119 100%);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .meta {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .meta h1 { margin: 0 0 6px; font-size: 24px; }
+      .meta p { margin: 0; color: var(--muted); }
+      video {
+        display: block;
+        width: 100%;
+        background: #000;
+        aspect-ratio: 16 / 9;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="topbar">
+        <div>
+          <a href="/">Home</a>
+          <a href="/security">Security View</a>
+        </div>
+      </div>
+      <section class="stage">
+        <div class="meta">
+          <h1>${escapeHtml(camera.name)}</h1>
+          <p>Camera ${escapeHtml(camera.id)}</p>
+        </div>
+        <video id="video" controls autoplay muted playsinline></video>
+      </section>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+    <script>
+      const streamUrl = ${JSON.stringify(streamUrl)};
+      const video = document.getElementById("video");
+      if (window.Hls && Hls.isSupported()) {
+        const hls = new Hls({
+          lowLatencyMode: true,
+          liveSyncDurationCount: 1,
+          liveMaxLatencyDurationCount: 3
+        });
+        hls.loadSource(streamUrl);
+        hls.attachMedia(video);
+      } else {
+        video.src = streamUrl;
+      }
+    </script>
+  </body>
+</html>`);
   });
 
   app.get("/google/setup", (req, res) => {
@@ -82,6 +483,9 @@ async function main() {
     const publicBaseUrl = config.baseUrl;
     const oauthConfigured = oauthStore.isConfigured();
     const isHttps = /^https:\/\//i.test(publicBaseUrl);
+    const isLocalBaseUrl = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/i.test(
+      publicBaseUrl
+    );
     const clientConfigured = Boolean(
       config.googleClientId && config.googleClientSecret
     );
@@ -169,7 +573,7 @@ async function main() {
   <body>
     <main>
       <h1>Google Home Setup</h1>
-      <p>Use this page to fill the Google Cloud OAuth client and Google Home cloud-to-cloud configuration with the exact values this bridge expects.</p>
+      <p>Use this page to verify the bridge's Google-facing configuration. For Google Home, the base URL must be a public HTTPS host that Google can reach.</p>
 
       <div class="grid">
         <section class="card">
@@ -181,9 +585,15 @@ async function main() {
           <div class="label" style="margin-top:12px">Checks</div>
           <ul>
             <li>Public HTTPS base URL: <span class="status ${isHttps ? "ok" : "bad"}">${htmlBool(isHttps)}</span></li>
+            <li>Base URL is not localhost: <span class="status ${!isLocalBaseUrl ? "ok" : "bad"}">${htmlBool(!isLocalBaseUrl)}</span></li>
             <li>OAuth client configured in app: <span class="status ${clientConfigured ? "ok" : "bad"}">${htmlBool(clientConfigured)}</span></li>
             <li>Local bridge login configured: <span class="status ${oauthConfigured ? "ok" : "bad"}">${htmlBool(oauthConfigured)}</span></li>
           </ul>
+          ${
+            isLocalBaseUrl
+              ? `<div class="status bad" style="margin-top:12px">Localhost cannot be used for Google Home account linking.</div>`
+              : ""
+          }
         </section>
 
         <section class="card">
@@ -207,12 +617,12 @@ ${escapeHtml(redirectSandbox)}</pre>
         </section>
 
         <section class="card">
-          <h2>Env Vars To Set</h2>
+          <h2>App Config Status</h2>
           <pre>GOOGLE_PROJECT_ID=${escapeHtml(config.googleProjectId)}
-GOOGLE_CLIENT_ID=${escapeHtml(config.googleClientId || "paste-client-id-here")}
-GOOGLE_CLIENT_SECRET=${escapeHtml(config.googleClientSecret || "paste-client-secret-here")}
-GOOGLE_AUTH_USER=${escapeHtml(config.googleAuthUser || "local-admin-username")}
-GOOGLE_AUTH_PASS=${escapeHtml(config.googleAuthPass ? "configured" : "local-admin-password")}
+GOOGLE_CLIENT_ID=${config.googleClientId ? "[configured]" : "[missing]"}
+GOOGLE_CLIENT_SECRET=${config.googleClientSecret ? "[configured]" : "[missing]"}
+GOOGLE_AUTH_USER=${config.googleAuthUser ? "[configured]" : "[missing]"}
+GOOGLE_AUTH_PASS=${config.googleAuthPass ? "[configured]" : "[missing]"}
 BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
         </section>
       </div>
@@ -348,7 +758,7 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
       config.cameras.map((camera) => ({
         id: camera.id,
         name: camera.name,
-        url: `/stream/${encodeURIComponent(camera.id)}/index.m3u8`
+        url: buildStreamUrl(config, camera.id)
       }))
     );
 
@@ -586,12 +996,36 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
         <span class="label">Auto Catch-up</span>
         <input id="catchup" type="checkbox" checked />
       </div>
+      <div class="control">
+        <button id="refreshVivintBtn">Refresh Vivint</button>
+        <span id="refreshStatus" class="label">refresh expired camera URLs</span>
+      </div>
     </div>
     <div id="grid" class="grid"></div>
     <div id="signalLoss" class="signal-loss">
       <div class="signal-loss-card">
         <div class="signal-title">Signal Lost</div>
         <div class="signal-sub">Attempting reconnect. This view will refresh when the server is back.</div>
+      </div>
+    </div>
+    <div id="refreshModal" class="signal-loss">
+      <div class="signal-loss-card" style="min-width: 340px; text-align:left;">
+        <div class="signal-title">Refresh Vivint URLs</div>
+        <div class="signal-sub" style="margin-bottom: 12px;">Credentials stay local and are only used to update your camera config.</div>
+        <form id="refreshForm">
+          <label class="label" for="vivintUser">Vivint Username</label>
+          <input id="vivintUser" name="username" style="width:100%; margin:6px 0 10px; padding:8px 10px;" autocomplete="username" />
+          <label class="label" for="vivintPass">Vivint Password</label>
+          <input id="vivintPass" name="password" type="password" style="width:100%; margin:6px 0 10px; padding:8px 10px;" autocomplete="current-password" />
+          <div id="mfaWrap" style="display:none;">
+            <label class="label" for="vivintMfa">MFA Code</label>
+            <input id="vivintMfa" name="mfaCode" style="width:100%; margin:6px 0 10px; padding:8px 10px;" inputmode="numeric" autocomplete="one-time-code" />
+          </div>
+          <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button type="button" id="refreshCancelBtn">Cancel</button>
+            <button type="submit" id="refreshSubmitBtn">Refresh</button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -608,6 +1042,15 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
       const rateEl = document.getElementById("rate");
       const catchupEl = document.getElementById("catchup");
       const signalLossEl = document.getElementById("signalLoss");
+      const refreshVivintBtn = document.getElementById("refreshVivintBtn");
+      const refreshStatusEl = document.getElementById("refreshStatus");
+      const refreshModal = document.getElementById("refreshModal");
+      const refreshForm = document.getElementById("refreshForm");
+      const refreshCancelBtn = document.getElementById("refreshCancelBtn");
+      const refreshSubmitBtn = document.getElementById("refreshSubmitBtn");
+      const mfaWrap = document.getElementById("mfaWrap");
+      const vivintMfa = document.getElementById("vivintMfa");
+      let pendingRefreshId = null;
 
       const sessions = [];
       let activeAudioCameraId = null;
@@ -658,6 +1101,17 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
 
       function showSignalLoss(show) {
         signalLossEl.classList.toggle("show", show);
+      }
+
+      function showRefreshModal(show) {
+        refreshModal.classList.toggle("show", show);
+        if (show) {
+          document.getElementById("vivintUser").focus();
+        }
+      }
+
+      function setRefreshStatus(text) {
+        refreshStatusEl.textContent = text;
       }
 
       async function armAudio() {
@@ -946,6 +1400,63 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
         document.body.classList.toggle("fill", fillScreenEl.checked);
       });
       focusModeEl.addEventListener("change", applyFocusMode);
+      refreshVivintBtn.addEventListener("click", () => {
+        mfaWrap.style.display = "none";
+        vivintMfa.value = "";
+        pendingRefreshId = null;
+        refreshSubmitBtn.textContent = "Refresh";
+        setRefreshStatus("waiting for Vivint credentials");
+        showRefreshModal(true);
+      });
+      refreshCancelBtn.addEventListener("click", () => {
+        showRefreshModal(false);
+        pendingRefreshId = null;
+        refreshForm.reset();
+        mfaWrap.style.display = "none";
+        refreshSubmitBtn.textContent = "Refresh";
+        setRefreshStatus("refresh expired camera URLs");
+      });
+      refreshForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        refreshSubmitBtn.disabled = true;
+        setRefreshStatus("refreshing URLs...");
+        const form = new FormData(refreshForm);
+        const payload = {
+          username: String(form.get("username") || "").trim(),
+          password: String(form.get("password") || ""),
+          mfaCode: String(form.get("mfaCode") || "").trim(),
+          pendingId: pendingRefreshId
+        };
+        try {
+          const response = await fetch("/admin/vivint/refresh", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json().catch(() => ({}));
+          if (response.status === 409 && data.error === "mfa_required") {
+            pendingRefreshId = data.pendingId || null;
+            mfaWrap.style.display = "block";
+            refreshSubmitBtn.textContent = "Verify Code";
+            setRefreshStatus("enter MFA code");
+            vivintMfa.focus();
+            return;
+          }
+          if (!response.ok) {
+            throw new Error(data.message || data.error || "Refresh failed.");
+          }
+          pendingRefreshId = null;
+          setRefreshStatus("camera URLs refreshed");
+          showRefreshModal(false);
+          window.location.reload();
+        } catch (error) {
+          setRefreshStatus(error.message || "Refresh failed.");
+        } finally {
+          refreshSubmitBtn.disabled = false;
+        }
+      });
 
       document.addEventListener("visibilitychange", () => {
         for (const s of sessions) {
@@ -1002,10 +1513,113 @@ BASE_URL=${escapeHtml(publicBaseUrl)}</pre>
     })
   );
 
+  app.post("/admin/vivint/refresh", localOnly, async (req, res) => {
+    // Require JSON so a cross-site HTML form cannot trigger this without a CORS preflight.
+    if (!req.is("application/json")) {
+      return res.status(415).json({
+        error: "unsupported_media_type",
+        message: "Send the refresh request as application/json."
+      });
+    }
+
+    const settingsDocument = loadSettingsDocument();
+    if (!settingsDocument) {
+      return res.status(400).json({
+        error: "settings_missing",
+        message: "settings.json is required for Vivint refresh."
+      });
+    }
+
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+    const mfaCode = String(req.body?.mfaCode || "").trim();
+    const pendingId = String(req.body?.pendingId || "").trim();
+
+    if (pendingId) {
+      const pending = consumePendingVivintRefresh(pendingId);
+      if (!pending) {
+        return res.status(410).json({
+          error: "mfa_session_expired",
+          message: "The pending Vivint MFA session expired. Start the refresh again."
+        });
+      }
+      if (!mfaCode) {
+        return res.status(400).json({
+          error: "missing_mfa_code",
+          message: "Vivint MFA code is required."
+        });
+      }
+
+      try {
+        await pending.client.verifyMfa(mfaCode);
+        const freshCameras = await collectVivintCameraRecords(pending.client);
+        const result = await applyRefreshedCameraDocument(
+          settingsDocument,
+          freshCameras
+        );
+        return res.json(result);
+      } catch (error) {
+        if (error instanceof VivintMfaRequiredError) {
+          const nextPendingId = createPendingVivintRefresh(pending.username, pending.client);
+          return res.status(409).json({
+            error: "mfa_required",
+            message: error.message,
+            mfaType: error.mfaType,
+            pendingId: nextPendingId
+          });
+        }
+        log.error(`Vivint refresh MFA verification failed: ${error.message}`);
+        return res.status(502).json({
+          error: "vivint_refresh_failed",
+          message: error.message
+        });
+      }
+    }
+
+    if (!username || !password) {
+      return res.status(400).json({
+        error: "missing_credentials",
+        message: "Vivint username and password are required."
+      });
+    }
+
+    const client = new VivintClient({ username, password });
+    try {
+      await client.connect();
+      const freshCameras = await collectVivintCameraRecords(client);
+      const result = await applyRefreshedCameraDocument(settingsDocument, freshCameras);
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof VivintMfaRequiredError) {
+        const nextPendingId = createPendingVivintRefresh(username, client);
+        return res.status(409).json({
+          error: "mfa_required",
+          message: error.message,
+          mfaType: error.mfaType,
+          pendingId: nextPendingId
+        });
+      }
+      log.error(`Vivint refresh failed: ${error.message}`);
+      return res.status(502).json({
+        error: "vivint_refresh_failed",
+        message: error.message
+      });
+    }
+  });
+
   app.get("/stream/:cameraId/index.m3u8", async (req, res) => {
     const { cameraId } = req.params;
     if (config.streamToken && req.query.token !== config.streamToken) {
-      return res.status(401).send("Invalid token");
+      const acceptsHtml = String(req.headers.accept || "").includes("text/html");
+      if (acceptsHtml) {
+        res.status(401).setHeader("content-type", "text/html; charset=utf-8");
+        return res.end(invalidTokenPage(cameraId));
+      }
+      return res.status(401).json({
+        error: "invalid_token",
+        message: "Invalid stream token.",
+        cameraId
+      });
     }
 
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
