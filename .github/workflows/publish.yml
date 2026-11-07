@@ -110,8 +110,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
             type=semver,pattern={{major}},value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
             type=raw,value=latest,enable=${{ steps.version.outputs.version != '' }}
-            type=raw,value=main
-            type=sha,format=short
+            type=raw,value=main,enable=${{ !inputs.tag }}
+            type=sha,format=short,enable=${{ !inputs.tag }}
           labels: |
             org.opencontainers.image.description=Home-network viewer and always-on HLS ingest for a Vivint panel
 
