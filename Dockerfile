@@ -1,26 +1,24 @@
 # syntax=docker/dockerfile:1
-# Multi-arch (linux/amd64, linux/arm64) without emulation: the final stage only copies files, so
-# nothing runs under QEMU. ffmpeg comes from a static multi-arch build, and the npm dependencies
-# (pure JavaScript, no native modules) are installed once on the build machine's own platform.
+# Multi-arch (linux/amd64, linux/arm64) on the official node Alpine image. The only step that runs
+# under emulation for arm64 is apk installing ffmpeg, which is quick. The npm dependencies (pure
+# JavaScript, no native modules) are installed once on the build machine's own platform.
 
-FROM mwader/static-ffmpeg:9.0.2-1 AS ffmpeg
-
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS deps
+FROM --platform=$BUILDPLATFORM node:22-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev && mkdir -p /out/streams
+RUN npm ci --omit=dev
 
-FROM node:22-bookworm-slim
+FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
+# HLS output goes to /app/streams, owned by the image's unprivileged node user (uid 1000).
+RUN apk add --no-cache ffmpeg \
+  && mkdir -p /app/streams && chown node:node /app/streams
 COPY --from=deps /app/node_modules ./node_modules
 COPY package*.json ./
 COPY src ./src
 COPY scripts/refresh_vivint_rtsp_urls.js ./scripts/
 COPY README.md LICENSE cameras.example.json ./
-# HLS output goes to /app/streams, owned by the image's unprivileged node user (uid 1000).
-COPY --from=deps --chown=1000:1000 /out/streams ./streams
 USER node
 
 EXPOSE 8080
